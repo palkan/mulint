@@ -1,14 +1,20 @@
+name: CI
+
 on: [push, pull_request]
+
 jobs:
   test:
     strategy:
       matrix:
-        platform: [ubuntu-latest]
+        platform: [ubuntu-latest, macos-latest]
+        go-version: ["1.24", "1.25"]
     runs-on: ${{ matrix.platform }}
     steps:
-    - uses: actions/checkout@v2
-    - uses: actions/setup-go@v2
-      with:
-        version: "^1.14.1"
-    - run: go test ./...
-      name: Run UI tests
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go-version }}
+      - name: Build
+        run: go build ./...
+      - name: Run tests
+        run: go test ./...

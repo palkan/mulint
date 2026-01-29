@@ -2,7 +2,7 @@ package tests
 
 import (
 	"fmt"
-	"io/ioutil"
+	"os"
 	"testing"
 
 	"github.com/gnieto/mulint/mulint"
@@ -38,7 +38,7 @@ func Test_MixedLocks(t *testing.T) {
 }
 
 func LoadFile(path string) string {
-	contents, err := ioutil.ReadFile(path)
+	contents, err := os.ReadFile(path)
 	if err != nil {
 		panic("Error loading file: " + err.Error())
 	}

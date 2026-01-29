@@ -5,9 +5,6 @@ import (
 	"go/ast"
 	"go/token"
 	"go/types"
-
-	"github.com/securego/gosec"
-	"golang.org/x/tools/go/loader"
 )
 
 type MutexScope struct {
@@ -48,15 +45,13 @@ type Scopes struct {
 	onGoing  map[string]*MutexScope
 	defers   map[string]bool
 	finished []*MutexScope
-	prog     *loader.Program
 }
 
-func NewScopes(prog *loader.Program) *Scopes {
+func NewScopes() *Scopes {
 	return &Scopes{
 		onGoing:  make(map[string]*MutexScope),
 		defers:   make(map[string]bool),
 		finished: make([]*MutexScope, 0),
-		prog:     prog,
 	}
 }
 
@@ -131,20 +126,18 @@ func (s *Scopes) isDeferUnlockCall(node ast.Node) ast.Expr {
 }
 
 type Visitor struct {
-	scopes  map[FQN]*Scopes
-	calls   map[FQN][]FQN
-	program *loader.Program
-	pkg     *types.Package
-	info    *types.Info
+	scopes map[FQN]*Scopes
+	calls  map[FQN][]FQN
+	pkg    *types.Package
+	info   *types.Info
 }
 
-func NewVisitor(prog *loader.Program, pkg *types.Package, info *types.Info) *Visitor {
+func NewVisitor(pkg *types.Package, info *types.Info) *Visitor {
 	return &Visitor{
-		scopes:  make(map[FQN]*Scopes),
-		calls:   make(map[FQN][]FQN),
-		program: prog,
-		pkg:     pkg,
-		info:    info,
+		scopes: make(map[FQN]*Scopes),
+		calls:  make(map[FQN][]FQN),
+		pkg:    pkg,
+		info:   info,
 	}
 }
 
@@ -171,13 +164,8 @@ func (v *Visitor) recordCalls(currentFQN FQN, body *ast.BlockStmt) {
 		call := CallExpr(stmt)
 
 		if call != nil {
-			ctx := gosec.Context{
-				Pkg:  v.pkg,
-				Info: v.info,
-			}
-
-			pkg, name, err := gosec.GetCallInfo(call, &ctx)
-			if err == nil {
+			pkg, name, ok := GetCallInfo(call, v.info)
+			if ok {
 				fqn := FromCallInfo(pkg, name)
 				v.addCall(currentFQN, fqn)
 			}
@@ -226,7 +214,7 @@ func (v *Visitor) Calls() map[FQN][]FQN {
 }
 
 func (v *Visitor) analyzeBody(fqn FQN, body *ast.BlockStmt) {
-	scopes := NewScopes(v.program)
+	scopes := NewScopes()
 
 	for _, stmt := range body.List {
 
