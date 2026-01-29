@@ -1,0 +1,72 @@
+name: Publish binaries
+on:
+  push:
+    tags:
+      - v*
+  workflow_dispatch:
+
+jobs:
+  upload_binaries:
+    runs-on: ubuntu-latest
+    env:
+      GO111MODULE: on
+      CGO_ENABLED: "0"
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - name: Set VERSION (if any)
+        if: ${{ contains(github.ref, 'refs/tags/v') }}
+        id: version
+        run: |
+          echo ::set-output name=VERSION::${GITHUB_REF#refs/tags/v}
+      - name: Build binaries
+        run: |
+          env GOOS=windows GOARCH=amd64 go build -ldflags "-s -w" -a -o dist/mulint-win-amd64.exe main.go
+          env GOOS=freebsd GOARCH=arm   go build -ldflags "-s -w" -a -o dist/mulint-freebsd-arm main.go
+          env GOOS=freebsd GOARCH=amd64 go build -ldflags "-s -w" -a -o dist/mulint-freebsd-amd64 main.go
+          env GOOS=linux GOARCH=arm64   go build -ldflags "-s -w" -a -o dist/mulint-linux-arm64 main.go
+          env GOOS=linux GOARCH=amd64   go build -ldflags "-s -w" -a -o dist/mulint-linux-amd64 main.go
+          dist/mulint-linux-amd64 -v
+      - uses: xresloader/upload-to-github-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          file: "dist/mulint-*"
+          tags: true
+
+  upload_macos_binaries:
+    needs: [upload_binaries]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os:
+          - macos-latest
+        suffix:
+          - arm64
+        include:
+          - os: macos-15-intel
+            suffix: amd64
+    env:
+      GO111MODULE: on
+      CGO_ENABLED: "0"
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - name: Set VERSION (if any)
+        if: ${{ contains(github.ref, 'refs/tags/v') }}
+        id: version
+        run: |
+          echo ::set-output name=VERSION::${GITHUB_REF#refs/tags/v}
+      - name: Build binaries for MacOS
+        run: |
+          env GOOS=darwin GOARCH=${{ matrix.suffix }} go build -ldflags "-s -w" -a -o dist/mulint-darwin-${{ matrix.suffix }} main.go
+      - uses: xresloader/upload-to-github-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          file: "dist/mulint-*"
+          tags: true

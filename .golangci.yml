@@ -1,0 +1,16 @@
+version: "2"
+
+run:
+  tests: true
+
+linters:
+  enable:
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+
+  exclusions:
+    paths-except:
+      - tests/*_test\.go

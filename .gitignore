@@ -1,0 +1,45 @@
+# Numerous always-ignore extensions
+*.diff
+*.err
+*.orig
+*.log
+*.rej
+*.swo
+*.swp
+*.vi
+*~
+*.sass-cache
+*.iml
+.idea/
+
+# Sublime
+*.sublime-project
+*.sublime-workspace
+
+# OS or Editor folders
+.DS_Store
+.cache
+.project
+.settings
+.tmproj
+Thumbs.db
+
+.bundle/
+
+.docker/*
+!.docker/*.nodoby
+!.docker/Dockerfile*
+
+log/*.log
+*.gz
+
+tmp/
+coverage/
+dist/
+
+debug*
+.vscode/
+
+/coverage.out
+
+.claude/*.local.*
