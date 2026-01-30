@@ -12,9 +12,10 @@ import (
 func Test_MixedLocks(t *testing.T) {
 
 	filemap := map[string]string{
-		"tests/mixed_locks.go":     LoadFile("mixed_locks.go"),
-		"tests/simple_rlock.go":    LoadFile("simple_rlock.go"),
-		"tests/transitive_lock.go": LoadFile("transitive_lock.go"),
+		"tests/mixed_locks.go":         LoadFile("mixed_locks.go"),
+		"tests/simple_rlock.go":        LoadFile("simple_rlock.go"),
+		"tests/transitive_lock.go":     LoadFile("transitive_lock.go"),
+		"tests/simple_wrapped_lock.go": LoadFile("simple_wrapped_lock.go"),
 	}
 	dir, cleanup, err := analysistest.WriteFiles(filemap)
 	if err != nil {

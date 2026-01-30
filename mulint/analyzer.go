@@ -19,10 +19,11 @@ func run(pass *analysis.Pass) (interface{}, error) {
 	for _, file := range pass.Files {
 		ast.Inspect(file, func(n ast.Node) bool {
 			v.Visit(n)
-
 			return true
 		})
 	}
+
+	v.AnalyzeAll()
 
 	a := NewAnalyzer(pass, v.Scopes(), v.Calls())
 	a.Analyze()
@@ -34,18 +35,21 @@ func run(pass *analysis.Pass) (interface{}, error) {
 	return nil, nil
 }
 
+// Analyzer checks for mutex-related issues in collected scopes.
 type Analyzer struct {
-	errors []LintError
-	pass   *analysis.Pass
-	scopes map[FQN]*Scopes
-	calls  map[FQN][]FQN
+	errors   []LintError
+	pass     *analysis.Pass
+	scopes   map[FQN]*LockTracker
+	calls    map[FQN][]FQN
+	reported map[token.Pos]bool // tracks secondLock positions to avoid duplicates
 }
 
-func NewAnalyzer(pass *analysis.Pass, scopes map[FQN]*Scopes, calls map[FQN][]FQN) *Analyzer {
+func NewAnalyzer(pass *analysis.Pass, scopes map[FQN]*LockTracker, calls map[FQN][]FQN) *Analyzer {
 	return &Analyzer{
-		pass:   pass,
-		scopes: scopes,
-		calls:  calls,
+		pass:     pass,
+		scopes:   scopes,
+		calls:    calls,
+		reported: make(map[token.Pos]bool),
 	}
 }
 
@@ -53,135 +57,168 @@ func (a *Analyzer) Errors() []LintError {
 	return a.errors
 }
 
+// Analyze runs all checks on collected scopes.
 func (a *Analyzer) Analyze() {
-	for _, s := range a.scopes {
-		for _, seq := range s.Scopes() {
-			for _, n := range seq.Nodes() {
-				a.ContainsLock(n, seq)
+	a.checkReentrantLocks()
+	// Future: a.checkMissingUnlocks()
+	// Future: a.checkDoubleUnlocks()
+	// Future: a.checkUnlockWithoutLock()
+}
+
+// checkReentrantLocks detects attempts to acquire a lock that's already held.
+func (a *Analyzer) checkReentrantLocks() {
+	for fqn, tracker := range a.scopes {
+		for _, scope := range tracker.Scopes() {
+			for _, node := range scope.Nodes() {
+				a.checkNodeForReentrantLock(node, scope, fqn)
 			}
 		}
 	}
 }
 
-func (a *Analyzer) ContainsLock(n ast.Node, seq *MutexScope) {
-	switch sty := n.(type) {
-	case *ast.ExprStmt:
-		a.ContainsLock(sty.X, seq)
-	case *ast.CallExpr:
-		a.checkLockToSequenceMutex(seq, sty)
-		a.checkCallToFuncWhichLocksSameMutex(seq, sty)
-	}
-}
-
-func (a *Analyzer) checkCallToFuncWhichLocksSameMutex(seq *MutexScope, callExpr *ast.CallExpr) {
-	pkg, name, ok := GetCallInfo(callExpr, a.pass.TypesInfo)
-
-	if ok {
-		fqn := FromCallInfo(pkg, name)
-
-		if a.hasTransitiveCall(fqn, seq, make(map[FQN]bool)) {
-			a.recordError(seq.Pos(), callExpr.Pos())
+func (a *Analyzer) checkNodeForReentrantLock(n ast.Node, scope *MutexScope, currentFQN FQN) {
+	// Walk the AST to find all CallExpr nodes within this statement
+	ast.Inspect(n, func(node ast.Node) bool {
+		if call, ok := node.(*ast.CallExpr); ok {
+			a.checkDirectReentrantLock(scope, call)
+			a.checkTransitiveReentrantLock(scope, call)
 		}
+		return true
+	})
+}
+
+// checkDirectReentrantLock checks if a call is a direct lock on the same mutex.
+func (a *Analyzer) checkDirectReentrantLock(scope *MutexScope, call *ast.CallExpr) {
+	subject := SubjectForCall(call, lockMethods)
+	if subject == nil {
+		return
+	}
+
+	selector := StrExpr(subject)
+	if selector == scope.Selector() {
+		a.recordError(scope.Pos(), call.Pos(), scope.Wrapper())
 	}
 }
 
-func (a *Analyzer) hasAnyMutexScopeWithSameSelector(fqn FQN, seq *MutexScope) bool {
-	mutexScopes, ok := a.scopes[fqn]
-
+// checkTransitiveReentrantLock checks if a call leads to a lock on the same mutex.
+func (a *Analyzer) checkTransitiveReentrantLock(scope *MutexScope, call *ast.CallExpr) {
+	pkg, name, ok := GetCallInfo(call, a.pass.TypesInfo)
 	if !ok {
+		return
+	}
+
+	// Skip if call is on a different receiver instance
+	if a.isCallOnDifferentReceiver(call, scope) {
+		return
+	}
+
+	fqn := FromCallInfo(pkg, name)
+	if a.hasTransitiveLock(fqn, scope, make(map[FQN]bool)) {
+		a.recordError(scope.Pos(), call.Pos(), scope.Wrapper())
+	}
+}
+
+// isCallOnDifferentReceiver checks if a method call is on a different receiver
+// than the one used in the mutex scope.
+func (a *Analyzer) isCallOnDifferentReceiver(call *ast.CallExpr, scope *MutexScope) bool {
+	selector := SelectorExpr(call)
+	if selector == nil {
 		return false
 	}
 
-	for _, currentMutexScope := range mutexScopes.Scopes() {
-		if currentMutexScope.IsEqual(seq) {
+	callReceiver := RootSelector(selector)
+	if callReceiver == nil {
+		return false
+	}
+
+	scopeRoot, _ := SplitSelector(scope.Selector())
+	if scopeRoot == "" {
+		return false
+	}
+
+	return callReceiver.Name != scopeRoot
+}
+
+// hasTransitiveLock checks if a function (or its callees) locks the same mutex.
+func (a *Analyzer) hasTransitiveLock(fqn FQN, scope *MutexScope, checked map[FQN]bool) bool {
+	if result, ok := checked[fqn]; ok {
+		return result
+	}
+
+	// Check if this function directly locks the same mutex
+	if tracker, ok := a.scopes[fqn]; ok {
+		for _, s := range tracker.Scopes() {
+			if s.HasSameSelector(scope) {
+				checked[fqn] = true
+				return true
+			}
+		}
+	}
+
+	// Check callees recursively
+	calls, ok := a.calls[fqn]
+	if !ok {
+		checked[fqn] = false
+		return false
+	}
+
+	for _, callee := range calls {
+		if a.hasTransitiveLock(callee, scope, checked) {
+			checked[fqn] = true
 			return true
 		}
 	}
 
+	checked[fqn] = false
 	return false
 }
 
-func (a *Analyzer) hasTransitiveCall(fqn FQN, seq *MutexScope, checked map[FQN]bool) bool {
-	if checked, ok := checked[fqn]; ok {
-		return checked
+func (a *Analyzer) recordError(origin, secondLock token.Pos, wrapper *WrapperInfo) {
+	// Deduplicate errors by secondLock position
+	if a.reported[secondLock] {
+		return
 	}
+	a.reported[secondLock] = true
 
-	if hasLock := a.hasAnyMutexScopeWithSameSelector(fqn, seq); hasLock {
-		checked[fqn] = hasLock
-
-		return hasLock
+	var err LintError
+	if wrapper != nil {
+		err = NewLintErrorWithWrapper(NewLocation(origin), NewLocation(secondLock), wrapper)
+	} else {
+		err = NewLintError(NewLocation(origin), NewLocation(secondLock))
 	}
-
-	calls, ok := a.calls[fqn]
-	if !ok {
-		return false
-	}
-
-	any := false
-	for _, c := range calls {
-		any = any || a.hasTransitiveCall(c, seq, checked)
-	}
-
-	return any
-}
-
-func (a *Analyzer) checkLockToSequenceMutex(seq *MutexScope, callExpr *ast.CallExpr) {
-	selector := StrExpr(SubjectForCall(callExpr, []string{"RLock", "Lock"}))
-
-	if selector == seq.Selector() {
-		a.recordError(seq.Pos(), callExpr.Pos())
-	}
-}
-
-func (a *Analyzer) recordError(origin, secondLock token.Pos) {
-	originLoc := NewLocation(origin)
-	secondLockLoc := NewLocation(secondLock)
-
-	err := NewLintError(originLoc, secondLockLoc)
 	a.errors = append(a.errors, err)
 }
 
 // GetCallInfo extracts the package path and function name from a call expression.
-// Returns (package path, function name, ok).
-func GetCallInfo(callExpr *ast.CallExpr, info *types.Info) (string, string, bool) {
-	switch fun := callExpr.Fun.(type) {
+func GetCallInfo(call *ast.CallExpr, info *types.Info) (string, string, bool) {
+	switch fun := call.Fun.(type) {
 	case *ast.SelectorExpr:
 		// Method call: x.Method() or pkg.Function()
-		sel, ok := info.Selections[fun]
-		if ok {
-			// It's a method call
+		if sel, ok := info.Selections[fun]; ok {
 			recv := sel.Recv()
-			if recv == nil {
-				return "", "", false
-			}
-			// Get the package path from the method's receiver type
 			obj := sel.Obj()
-			if obj == nil {
+			if recv == nil || obj == nil {
 				return "", "", false
 			}
-			pkg := obj.Pkg()
 			pkgPath := ""
-			if pkg != nil {
+			if pkg := obj.Pkg(); pkg != nil {
 				pkgPath = pkg.Path()
 			}
-			// For method calls, include the receiver type name (without package) in the name
-			// to match the format from fqn(): "pkg.RecvType:MethodName"
 			recvTypeName := getTypeName(recv)
 			return pkgPath, recvTypeName + ":" + fun.Sel.Name, true
 		}
-		// It might be a package-qualified function call
+		// Package-qualified function call
 		if ident, ok := fun.X.(*ast.Ident); ok {
 			if pkgName, ok := info.Uses[ident].(*types.PkgName); ok {
 				return pkgName.Imported().Path(), fun.Sel.Name, true
 			}
 		}
 	case *ast.Ident:
-		// Direct function call: Function()
+		// Direct function call
 		if obj := info.Uses[fun]; obj != nil {
 			if fn, ok := obj.(*types.Func); ok {
-				pkg := fn.Pkg()
 				pkgPath := ""
-				if pkg != nil {
+				if pkg := fn.Pkg(); pkg != nil {
 					pkgPath = pkg.Path()
 				}
 				return pkgPath, fun.Name, true
@@ -191,7 +228,7 @@ func GetCallInfo(callExpr *ast.CallExpr, info *types.Info) (string, string, bool
 	return "", "", false
 }
 
-// getTypeName extracts just the type name from a types.Type, without the package path.
+// getTypeName extracts just the type name from a types.Type.
 func getTypeName(t types.Type) string {
 	switch ty := t.(type) {
 	case *types.Pointer:

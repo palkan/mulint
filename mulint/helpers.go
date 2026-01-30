@@ -1,79 +1,99 @@
 package mulint
 
 import (
+	"bytes"
 	"go/ast"
+	"go/printer"
+	"go/token"
 )
 
-func CallExpr(node ast.Node) *ast.CallExpr {
-	switch sty := node.(type) {
-	case *ast.CallExpr:
-		return sty
-	case *ast.ExprStmt:
-		exp, ok := sty.X.(*ast.CallExpr)
+// StrExpr converts an AST expression to its string representation.
+func StrExpr(e ast.Expr) string {
+	var buf bytes.Buffer
+	printer.Fprint(&buf, token.NewFileSet(), e)
+	return buf.String()
+}
 
-		if ok {
-			return exp
+// SplitSelector splits a selector string into root and field parts.
+// For example, "w.m" returns ("w", "m"), "s.mu" returns ("s", "mu").
+func SplitSelector(selector string) (root, field string) {
+	for i, c := range selector {
+		if c == '.' {
+			return selector[:i], selector[i+1:]
 		}
 	}
+	return selector, ""
+}
 
+// CallExpr extracts a CallExpr from a node if present.
+func CallExpr(node ast.Node) *ast.CallExpr {
+	switch n := node.(type) {
+	case *ast.CallExpr:
+		return n
+	case *ast.ExprStmt:
+		if call, ok := n.X.(*ast.CallExpr); ok {
+			return call
+		}
+	case *ast.AssignStmt:
+		// Handle: v := foo() or v = foo()
+		for _, rhs := range n.Rhs {
+			if call, ok := rhs.(*ast.CallExpr); ok {
+				return call
+			}
+		}
+	}
 	return nil
 }
 
+// SubjectForCall returns the receiver expression if the node is a call
+// to one of the named methods. For example, for "m.Lock()" with names=["Lock"],
+// it returns the expression "m".
 func SubjectForCall(node ast.Node, names []string) ast.Expr {
-	switch sty := node.(type) {
+	var call *ast.CallExpr
+
+	switch n := node.(type) {
 	case *ast.CallExpr:
-		selector := SelectorExpr(sty)
-
-		fnName := ""
-		if selector != nil {
-			fnName = selector.Sel.Name
-		}
-
-		for _, name := range names {
-			if name == fnName {
-				return selector.X
-			}
-		}
+		call = n
 	case *ast.ExprStmt:
-		exp, ok := sty.X.(*ast.CallExpr)
+		var ok bool
+		call, ok = n.X.(*ast.CallExpr)
 		if !ok {
 			return nil
 		}
-
-		selector := SelectorExpr(exp)
-		fnName := ""
-		if selector != nil {
-			fnName = selector.Sel.Name
-		}
-
-		for _, name := range names {
-			if name == fnName {
-				return selector.X
-			}
-		}
 	default:
+		return nil
 	}
 
+	selector := SelectorExpr(call)
+	if selector == nil {
+		return nil
+	}
+
+	fnName := selector.Sel.Name
+	for _, name := range names {
+		if name == fnName {
+			return selector.X
+		}
+	}
 	return nil
 }
 
+// RootSelector extracts the root identifier from a selector expression.
+// For "a.b.c", it returns "a".
 func RootSelector(sel *ast.SelectorExpr) *ast.Ident {
-	switch sty := sel.X.(type) {
+	switch x := sel.X.(type) {
 	case *ast.SelectorExpr:
-		return RootSelector(sty)
+		return RootSelector(x)
 	case *ast.Ident:
-		return sty
+		return x
 	}
-
 	return nil
 }
 
+// SelectorExpr extracts the SelectorExpr from a call expression's function.
 func SelectorExpr(call *ast.CallExpr) *ast.SelectorExpr {
-	switch exp := call.Fun.(type) {
-	case *ast.SelectorExpr:
-		return exp
-	default:
+	if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+		return sel
 	}
-
 	return nil
 }

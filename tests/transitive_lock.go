@@ -32,6 +32,12 @@ func (s *some) ShouldNotDetectDeadLock() {
 	s.deepLock()
 }
 
+func (s *some) ShouldDetectDeadLockWithNoUnlock() {
+	s.m.RLock()
+	s.nonUnlockingMethod() // want "Mutex lock is acquired on this line"
+	s.m.Unlock()
+}
+
 func (s some) test() {}
 
 func (s *some) deepLock() {
@@ -42,6 +48,11 @@ func (s *some) recursiveRLock() {
 	s.m.RLock()
 	s.ms[24322] = "this is very bad!"
 	s.m.RUnlock()
+}
+
+func (s *some) nonUnlockingMethod() {
+	s.m.RLock()
+	s.ms[323] = "where is Unlock()?"
 }
 
 func noneStructMethod() {

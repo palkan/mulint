@@ -2,6 +2,7 @@ package mulint
 
 import (
 	"bufio"
+	"fmt"
 	"go/token"
 	"os"
 	"strings"
@@ -10,14 +11,24 @@ import (
 )
 
 type LintError struct {
-	origin     Location
-	secondLock Location
+	origin        Location
+	secondLock    Location
+	originWrapper *WrapperInfo // non-nil if origin lock was via wrapper
 }
 
 func NewLintError(origin Location, secondLock Location) LintError {
 	return LintError{
-		origin:     origin,
-		secondLock: secondLock,
+		origin:        origin,
+		secondLock:    secondLock,
+		originWrapper: nil,
+	}
+}
+
+func NewLintErrorWithWrapper(origin Location, secondLock Location, wrapper *WrapperInfo) LintError {
+	return LintError{
+		origin:        origin,
+		secondLock:    secondLock,
+		originWrapper: wrapper,
 	}
 }
 
@@ -35,12 +46,24 @@ func (le LintError) Report(pass *analysis.Pass) {
 	originLockPosition := pass.Fset.Position(le.origin.pos)
 	originLine := le.GetLine(pass, originLockPosition)
 
+	// Add wrapper info if the origin lock was via a wrapper
+	originSuffix := ""
+	if le.originWrapper != nil {
+		wrapperLockPosition := pass.Fset.Position(le.originWrapper.LockPos)
+		originSuffix = fmt.Sprintf(" (via %s at %s:%d)",
+			le.originWrapper.FQN.ShortName(),
+			le.baseFilename(wrapperLockPosition.Filename),
+			wrapperLockPosition.Line,
+		)
+	}
+
 	pass.Reportf(le.secondLock.Pos(),
-		"Mutex lock is acquired on this line: %s\n\t%s:%d: But the same lock was acquired here: %s\n",
+		"Mutex lock is acquired on this line: %s\n\t%s:%d: But the same lock was acquired here: %s%s\n",
 		strings.TrimSpace(secondLockLine),
 		le.baseFilename(originLockPosition.Filename),
 		originLockPosition.Line,
 		strings.TrimSpace(originLine),
+		originSuffix,
 	)
 }
 

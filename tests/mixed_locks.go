@@ -33,3 +33,13 @@ func (m *mixed) Interleaved() {
 	m.m.Unlock()
 	m.m2.Unlock()
 }
+
+// Should not raise
+func (m *mixed) VariedStructs() {
+	m.m.Lock()
+
+	another := &mixed{}
+	another.Test()
+
+	m.m.Unlock()
+}

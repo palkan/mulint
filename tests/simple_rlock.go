@@ -1,6 +1,7 @@
 package tests
 
 import (
+	"fmt"
 	"sync"
 )
 
@@ -14,4 +15,43 @@ func (a *another) Test() {
 
 	a.m.Lock() // want "Mutex lock is acquired on this line"
 	a.m.Unlock()
+}
+
+func (a *another) TestWithSwitch(val int) string {
+	switch val {
+	case 1:
+		a.m.RLock()
+		defer a.m.RUnlock()
+
+		return "uno"
+	case 2:
+		a.m.RLock()
+		defer a.m.RUnlock()
+
+		return "due"
+	}
+
+	return ""
+}
+
+func (a *another) isGood() bool {
+	a.m.RLock()
+	defer a.m.RUnlock()
+
+	return true
+}
+
+func (a *another) TestExpression() {
+	a.m.RLock()
+	v := a.isGood() // want "Mutex lock is acquired on this line"
+	fmt.Println(v)
+	a.m.RUnlock()
+}
+
+func (a *another) TestIf() {
+	a.m.RLock()
+	if a.isGood() { // want "Mutex lock is acquired on this line"
+		return
+	}
+	a.m.RUnlock()
 }
