@@ -98,8 +98,10 @@ func NewLockTracker() *LockTracker {
 // Track processes a statement for lock/unlock operations.
 // If addToOngoing is true, the statement is added to all currently held lock scopes.
 func (t *LockTracker) Track(stmt ast.Stmt, addToOngoing bool) {
+	// For compound statements, add only the "prefix" parts (init, condition)
+	// that execute before any body code, not the entire statement.
 	if addToOngoing {
-		t.AddToOngoing(stmt)
+		t.addStatementToOngoing(stmt)
 	}
 
 	// Check for lock acquisition
@@ -126,6 +128,114 @@ func (t *LockTracker) Track(stmt ast.Stmt, addToOngoing bool) {
 		}
 		// Future: else track as unmatched unlock
 	}
+
+	// Recurse into nested blocks
+	t.trackNestedStatements(stmt, addToOngoing)
+}
+
+// addStatementToOngoing adds the appropriate parts of a statement to ongoing scopes.
+// For compound statements, only add prefix parts (init, condition) that execute
+// before body code, so that unlocks in the body don't affect them.
+func (t *LockTracker) addStatementToOngoing(stmt ast.Stmt) {
+	switch s := stmt.(type) {
+	case *ast.IfStmt:
+		// Add init and condition - they execute before the body
+		if s.Init != nil {
+			t.AddToOngoing(s.Init)
+		}
+		if s.Cond != nil {
+			t.addExprToOngoing(s.Cond)
+		}
+	case *ast.ForStmt:
+		if s.Init != nil {
+			t.AddToOngoing(s.Init)
+		}
+		if s.Cond != nil {
+			t.addExprToOngoing(s.Cond)
+		}
+		// Note: Post executes after body, so we don't add it here
+	case *ast.RangeStmt:
+		if s.X != nil {
+			t.addExprToOngoing(s.X)
+		}
+	case *ast.SwitchStmt:
+		if s.Init != nil {
+			t.AddToOngoing(s.Init)
+		}
+		if s.Tag != nil {
+			t.addExprToOngoing(s.Tag)
+		}
+	case *ast.TypeSwitchStmt:
+		if s.Init != nil {
+			t.AddToOngoing(s.Init)
+		}
+		if s.Assign != nil {
+			t.AddToOngoing(s.Assign)
+		}
+	case *ast.SelectStmt:
+		// Select has no prefix expressions
+	case *ast.BlockStmt:
+		// Block has no prefix expressions
+	default:
+		// Non-compound statements: add the whole thing
+		t.AddToOngoing(stmt)
+	}
+}
+
+// addExprToOngoing wraps an expression and adds it to ongoing scopes.
+func (t *LockTracker) addExprToOngoing(expr ast.Expr) {
+	for _, scope := range t.onGoing {
+		scope.Add(expr)
+	}
+}
+
+// trackNestedStatements processes statements inside compound statements.
+func (t *LockTracker) trackNestedStatements(stmt ast.Stmt, addToOngoing bool) {
+	switch s := stmt.(type) {
+	case *ast.IfStmt:
+		if s.Body != nil {
+			for _, inner := range s.Body.List {
+				t.Track(inner, addToOngoing)
+			}
+		}
+		if s.Else != nil {
+			switch e := s.Else.(type) {
+			case *ast.BlockStmt:
+				for _, inner := range e.List {
+					t.Track(inner, addToOngoing)
+				}
+			case *ast.IfStmt:
+				t.Track(e, addToOngoing)
+			}
+		}
+	case *ast.ForStmt:
+		if s.Body != nil {
+			for _, inner := range s.Body.List {
+				t.Track(inner, addToOngoing)
+			}
+		}
+	case *ast.RangeStmt:
+		if s.Body != nil {
+			for _, inner := range s.Body.List {
+				t.Track(inner, addToOngoing)
+			}
+		}
+	case *ast.BlockStmt:
+		for _, inner := range s.List {
+			t.Track(inner, addToOngoing)
+		}
+	}
+}
+
+// isCompoundStatement returns true if the statement contains nested blocks.
+func isCompoundStatement(stmt ast.Stmt) bool {
+	switch stmt.(type) {
+	case *ast.IfStmt, *ast.ForStmt, *ast.RangeStmt,
+		*ast.SwitchStmt, *ast.TypeSwitchStmt, *ast.SelectStmt,
+		*ast.BlockStmt:
+		return true
+	}
+	return false
 }
 
 // AddToOngoing adds a node to all currently held lock scopes.

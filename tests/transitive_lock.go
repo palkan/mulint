@@ -38,6 +38,16 @@ func (s *some) ShouldDetectDeadLockWithNoUnlock() {
 	s.m.Unlock()
 }
 
+func (s *some) ShouldNotDetectAfterUnlock() {
+	s.m.RLock()
+	if s.sm["test"] > 0 {
+		s.m.Unlock()
+		s.recursiveRLock()
+	}
+
+	s.m.Unlock()
+}
+
 func (s some) test() {}
 
 func (s *some) deepLock() {

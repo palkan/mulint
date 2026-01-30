@@ -138,14 +138,29 @@ func NewWrapperAwareTracker(registry *WrapperRegistry, typeInfo *types.Info) *Wr
 
 // TrackWithWrappers processes a statement, recognizing both direct and wrapper lock/unlock calls.
 func (t *WrapperAwareTracker) TrackWithWrappers(stmt ast.Stmt) {
-	// Add to ongoing scopes first
-	t.AddToOngoing(stmt)
+	// Only add leaf statements to ongoing scopes.
+	// Compound statements (if, for, switch, etc.) should not be added as a whole
+	// because they may contain unlocks that affect subsequent statements within the block.
+	if !isCompoundStmt(stmt) {
+		t.AddToOngoing(stmt)
+	}
 
 	// Check for wrapper calls (creates new scopes)
 	t.trackWrapperCall(stmt)
 
 	// Track direct lock/unlock calls (don't re-add to scopes)
 	t.Track(stmt, false)
+}
+
+// isCompoundStmt returns true if the statement contains nested blocks.
+func isCompoundStmt(stmt ast.Stmt) bool {
+	switch stmt.(type) {
+	case *ast.IfStmt, *ast.ForStmt, *ast.RangeStmt,
+		*ast.SwitchStmt, *ast.TypeSwitchStmt, *ast.SelectStmt,
+		*ast.BlockStmt:
+		return true
+	}
+	return false
 }
 
 // trackWrapperCall checks if a statement is a call to a wrapper method.
