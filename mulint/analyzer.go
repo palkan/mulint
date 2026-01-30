@@ -79,6 +79,10 @@ func (a *Analyzer) checkReentrantLocks() {
 func (a *Analyzer) checkNodeForReentrantLock(n ast.Node, scope *MutexScope, currentFQN FQN) {
 	// Walk the AST to find all CallExpr nodes within this statement
 	ast.Inspect(n, func(node ast.Node) bool {
+		// Skip goroutines - they run asynchronously, lock may be released
+		if _, ok := node.(*ast.GoStmt); ok {
+			return false
+		}
 		if call, ok := node.(*ast.CallExpr); ok {
 			a.checkDirectReentrantLock(scope, call)
 			a.checkTransitiveReentrantLock(scope, call)

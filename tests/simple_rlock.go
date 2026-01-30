@@ -55,3 +55,17 @@ func (a *another) TestIf() {
 	}
 	a.m.RUnlock()
 }
+
+func (a *another) TestRoutine() {
+	a.m.RLock()
+
+	res := make(chan bool)
+
+	go func() {
+		res <- a.isGood()
+	}()
+
+	a.m.RUnlock()
+
+	<-res
+}
