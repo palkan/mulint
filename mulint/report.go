@@ -5,10 +5,25 @@ import (
 	"fmt"
 	"go/token"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"golang.org/x/tools/go/analysis"
 )
+
+// relativePath returns the path relative to the current working directory.
+// Falls back to the original path if relative path cannot be computed.
+func relativePath(filename string) string {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return filename
+	}
+	rel, err := filepath.Rel(cwd, filename)
+	if err != nil {
+		return filename
+	}
+	return rel
+}
 
 type LintError struct {
 	origin        Location
@@ -52,7 +67,7 @@ func (le LintError) Report(pass *analysis.Pass) {
 		wrapperLockPosition := pass.Fset.Position(le.originWrapper.LockPos)
 		originSuffix = fmt.Sprintf(" (via %s at %s:%d)",
 			le.originWrapper.FQN.ShortName(),
-			le.baseFilename(wrapperLockPosition.Filename),
+			relativePath(wrapperLockPosition.Filename),
 			wrapperLockPosition.Line,
 		)
 	}
@@ -60,7 +75,7 @@ func (le LintError) Report(pass *analysis.Pass) {
 	pass.Reportf(le.secondLock.Pos(),
 		"Mutex lock is acquired on this line: %s\n\t%s:%d: But the same lock was acquired here: %s%s\n",
 		strings.TrimSpace(secondLockLine),
-		le.baseFilename(originLockPosition.Filename),
+		relativePath(originLockPosition.Filename),
 		originLockPosition.Line,
 		strings.TrimSpace(originLine),
 		originSuffix,
@@ -71,16 +86,6 @@ func (le LintError) GetLine(pass *analysis.Pass, position token.Position) string
 	lines := le.readfile(position.Filename)
 
 	return lines[position.Line-1]
-}
-
-func (le LintError) baseFilename(filename string) string {
-	parts := strings.Split(filename, "/")
-
-	if len(parts) == 0 {
-		return filename
-	}
-
-	return parts[len(parts)-1]
 }
 
 func (le LintError) readfile(filename string) []string {
@@ -144,14 +149,14 @@ func (e MissingUnlockError) Report(pass *analysis.Pass) {
 		wrapperLockPosition := pass.Fset.Position(e.wrapper.LockPos)
 		lockSuffix = fmt.Sprintf(" (via %s at %s:%d)",
 			e.wrapper.FQN.ShortName(),
-			e.baseFilename(wrapperLockPosition.Filename),
+			relativePath(wrapperLockPosition.Filename),
 			wrapperLockPosition.Line,
 		)
 	}
 
 	pass.Reportf(e.returnPos.Pos(),
 		"Mutex lock must be released before this line\n\t%s:%d: Lock was acquired here: %s%s\n",
-		e.baseFilename(lockPosition.Filename),
+		relativePath(lockPosition.Filename),
 		lockPosition.Line,
 		strings.TrimSpace(lockLine),
 		lockSuffix,
@@ -164,14 +169,6 @@ func (e MissingUnlockError) GetLine(pass *analysis.Pass, position token.Position
 		return ""
 	}
 	return lines[position.Line-1]
-}
-
-func (e MissingUnlockError) baseFilename(filename string) string {
-	parts := strings.Split(filename, "/")
-	if len(parts) == 0 {
-		return filename
-	}
-	return parts[len(parts)-1]
 }
 
 func (e MissingUnlockError) readfile(filename string) []string {
