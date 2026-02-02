@@ -73,6 +73,30 @@ Examples:
   }
   ```
 
+- Missing unlocks on return.
+
+  The linter detects return statements in branches that exit while a mutex is still held:
+
+  ```go
+  func (s *Service) Process(task string) error {
+      s.mu.Lock()
+  
+      if _, ok := s.cache[task]; ok {
+          s.mu.Unlock()
+          return nil // OK: unlocked before return
+      }
+  
+      result, err := s.doWork(task)
+      if err != nil {
+          return err // ERROR: mutex still held
+      }
+  
+      s.cache[task] = result
+      s.mu.Unlock()
+      return nil
+  }
+  ```
+
 - Recursive `RLock()` (see below):
 
   ```go

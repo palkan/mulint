@@ -110,3 +110,81 @@ func NewLocation(pos token.Pos) Location {
 func (l Location) Pos() token.Pos {
 	return l.pos
 }
+
+// MissingUnlockError reports a return statement without releasing a held lock.
+type MissingUnlockError struct {
+	lockPos   Location
+	returnPos Location
+	wrapper   *WrapperInfo // non-nil if the lock was acquired via wrapper
+}
+
+func NewMissingUnlockError(lockPos, returnPos Location) MissingUnlockError {
+	return MissingUnlockError{
+		lockPos:   lockPos,
+		returnPos: returnPos,
+		wrapper:   nil,
+	}
+}
+
+func NewMissingUnlockErrorWithWrapper(lockPos, returnPos Location, wrapper *WrapperInfo) MissingUnlockError {
+	return MissingUnlockError{
+		lockPos:   lockPos,
+		returnPos: returnPos,
+		wrapper:   wrapper,
+	}
+}
+
+func (e MissingUnlockError) Report(pass *analysis.Pass) {
+	lockPosition := pass.Fset.Position(e.lockPos.pos)
+	lockLine := e.GetLine(pass, lockPosition)
+
+	// Add wrapper info if the lock was via a wrapper
+	lockSuffix := ""
+	if e.wrapper != nil {
+		wrapperLockPosition := pass.Fset.Position(e.wrapper.LockPos)
+		lockSuffix = fmt.Sprintf(" (via %s at %s:%d)",
+			e.wrapper.FQN.ShortName(),
+			e.baseFilename(wrapperLockPosition.Filename),
+			wrapperLockPosition.Line,
+		)
+	}
+
+	pass.Reportf(e.returnPos.Pos(),
+		"Mutex lock must be released before this line\n\t%s:%d: Lock was acquired here: %s%s\n",
+		e.baseFilename(lockPosition.Filename),
+		lockPosition.Line,
+		strings.TrimSpace(lockLine),
+		lockSuffix,
+	)
+}
+
+func (e MissingUnlockError) GetLine(pass *analysis.Pass, position token.Position) string {
+	lines := e.readfile(position.Filename)
+	if position.Line > len(lines) {
+		return ""
+	}
+	return lines[position.Line-1]
+}
+
+func (e MissingUnlockError) baseFilename(filename string) string {
+	parts := strings.Split(filename, "/")
+	if len(parts) == 0 {
+		return filename
+	}
+	return parts[len(parts)-1]
+}
+
+func (e MissingUnlockError) readfile(filename string) []string {
+	var f, err = os.Open(filename)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+
+	var lines []string
+	var scanner = bufio.NewScanner(f)
+	for scanner.Scan() {
+		lines = append(lines, scanner.Text())
+	}
+	return lines
+}

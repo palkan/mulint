@@ -51,7 +51,7 @@ func (a *another) TestExpression() {
 func (a *another) TestIf() {
 	a.m.RLock()
 	if a.isGood() { // want "Mutex lock is acquired on this line"
-		return
+		return // want "Mutex lock must be released before this line"
 	}
 	a.m.RUnlock()
 }

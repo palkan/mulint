@@ -132,3 +132,13 @@ func (v *Visitor) Scopes() map[FQN]*LockTracker {
 func (v *Visitor) Calls() map[FQN][]FQN {
 	return v.calls
 }
+
+// Funcs returns the collected function declarations.
+func (v *Visitor) Funcs() []*ast.FuncDecl {
+	return v.funcs
+}
+
+// Wrappers returns the wrapper registry.
+func (v *Visitor) Wrappers() *WrapperRegistry {
+	return v.wrappers
+}

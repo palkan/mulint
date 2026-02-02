@@ -25,10 +25,14 @@ func run(pass *analysis.Pass) (interface{}, error) {
 
 	v.AnalyzeAll()
 
-	a := NewAnalyzer(pass, v.Scopes(), v.Calls())
+	a := NewAnalyzer(pass, v.Scopes(), v.Calls(), v.Funcs(), v.Wrappers(), pass.TypesInfo)
 	a.Analyze()
 
 	for _, e := range a.Errors() {
+		e.Report(pass)
+	}
+
+	for _, e := range a.MissingUnlockErrors() {
 		e.Report(pass)
 	}
 
@@ -37,19 +41,27 @@ func run(pass *analysis.Pass) (interface{}, error) {
 
 // Analyzer checks for mutex-related issues in collected scopes.
 type Analyzer struct {
-	errors   []LintError
-	pass     *analysis.Pass
-	scopes   map[FQN]*LockTracker
-	calls    map[FQN][]FQN
-	reported map[token.Pos]bool // tracks secondLock positions to avoid duplicates
+	errors         []LintError
+	missingUnlocks []MissingUnlockError
+	pass           *analysis.Pass
+	scopes         map[FQN]*LockTracker
+	calls          map[FQN][]FQN
+	reported       map[token.Pos]bool // tracks secondLock positions to avoid duplicates
+	funcs          []*ast.FuncDecl
+	wrappers       *WrapperRegistry
+	info           *types.Info
 }
 
-func NewAnalyzer(pass *analysis.Pass, scopes map[FQN]*LockTracker, calls map[FQN][]FQN) *Analyzer {
+func NewAnalyzer(pass *analysis.Pass, scopes map[FQN]*LockTracker, calls map[FQN][]FQN, funcs []*ast.FuncDecl, wrappers *WrapperRegistry, info *types.Info) *Analyzer {
 	return &Analyzer{
-		pass:     pass,
-		scopes:   scopes,
-		calls:    calls,
-		reported: make(map[token.Pos]bool),
+		pass:           pass,
+		scopes:         scopes,
+		calls:          calls,
+		reported:       make(map[token.Pos]bool),
+		funcs:          funcs,
+		wrappers:       wrappers,
+		info:           info,
+		missingUnlocks: make([]MissingUnlockError, 0),
 	}
 }
 
@@ -57,12 +69,51 @@ func (a *Analyzer) Errors() []LintError {
 	return a.errors
 }
 
+func (a *Analyzer) MissingUnlockErrors() []MissingUnlockError {
+	return a.missingUnlocks
+}
+
 // Analyze runs all checks on collected scopes.
 func (a *Analyzer) Analyze() {
 	a.checkReentrantLocks()
-	// Future: a.checkMissingUnlocks()
+	a.checkMissingUnlocks()
 	// Future: a.checkDoubleUnlocks()
 	// Future: a.checkUnlockWithoutLock()
+}
+
+// checkMissingUnlocks detects return statements that occur while a lock is held.
+func (a *Analyzer) checkMissingUnlocks() {
+	for _, fn := range a.funcs {
+		if fn.Body == nil {
+			continue
+		}
+
+		tracker := NewBranchTrackerWithWrappers(a.wrappers, a.info)
+		tracker.AnalyzeStatements(fn.Body.List)
+
+		for _, err := range tracker.Errors() {
+			// Deduplicate by return position
+			if a.reported[err.returnPos] {
+				continue
+			}
+			a.reported[err.returnPos] = true
+
+			var unlockErr MissingUnlockError
+			if err.lockInfo.wrapper != nil {
+				unlockErr = NewMissingUnlockErrorWithWrapper(
+					NewLocation(err.lockInfo.pos),
+					NewLocation(err.returnPos),
+					err.lockInfo.wrapper,
+				)
+			} else {
+				unlockErr = NewMissingUnlockError(
+					NewLocation(err.lockInfo.pos),
+					NewLocation(err.returnPos),
+				)
+			}
+			a.missingUnlocks = append(a.missingUnlocks, unlockErr)
+		}
+	}
 }
 
 // checkReentrantLocks detects attempts to acquire a lock that's already held.
