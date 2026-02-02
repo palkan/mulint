@@ -5,7 +5,7 @@ import (
 	"os"
 	"testing"
 
-	"github.com/gnieto/mulint/mulint"
+	"github.com/palkan/mulint/mulint"
 	"golang.org/x/tools/go/analysis/analysistest"
 )
 

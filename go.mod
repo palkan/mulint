@@ -1,4 +1,4 @@
-module github.com/gnieto/mulint
+module github.com/palkan/mulint
 
 go 1.25.4
 
