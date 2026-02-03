@@ -95,6 +95,22 @@ func NewLockTracker() *LockTracker {
 	}
 }
 
+// Clone creates a copy of the tracker for independent branch analysis.
+func (t *LockTracker) Clone() *LockTracker {
+	clone := &LockTracker{
+		onGoing:  make(map[string]*MutexScope, len(t.onGoing)),
+		defers:   make(map[string]bool, len(t.defers)),
+		finished: make([]*MutexScope, 0),
+	}
+	for k, v := range t.onGoing {
+		clone.onGoing[k] = v
+	}
+	for k, v := range t.defers {
+		clone.defers[k] = v
+	}
+	return clone
+}
+
 // Track processes a statement for lock/unlock operations.
 // If addToOngoing is true, the statement is added to all currently held lock scopes.
 func (t *LockTracker) Track(stmt ast.Stmt, addToOngoing bool) {
@@ -193,20 +209,27 @@ func (t *LockTracker) addExprToOngoing(expr ast.Expr) {
 func (t *LockTracker) trackNestedStatements(stmt ast.Stmt, addToOngoing bool) {
 	switch s := stmt.(type) {
 	case *ast.IfStmt:
+		// Track each branch independently to avoid cross-branch contamination
 		if s.Body != nil {
+			ifTracker := t.Clone()
 			for _, inner := range s.Body.List {
-				t.Track(inner, addToOngoing)
+				ifTracker.Track(inner, addToOngoing)
 			}
+			ifTracker.EndBlock()
+			t.finished = append(t.finished, ifTracker.finished...)
 		}
 		if s.Else != nil {
+			elseTracker := t.Clone()
 			switch e := s.Else.(type) {
 			case *ast.BlockStmt:
 				for _, inner := range e.List {
-					t.Track(inner, addToOngoing)
+					elseTracker.Track(inner, addToOngoing)
 				}
 			case *ast.IfStmt:
-				t.Track(e, addToOngoing)
+				elseTracker.Track(e, addToOngoing)
 			}
+			elseTracker.EndBlock()
+			t.finished = append(t.finished, elseTracker.finished...)
 		}
 	case *ast.ForStmt:
 		if s.Body != nil {
@@ -218,6 +241,47 @@ func (t *LockTracker) trackNestedStatements(stmt ast.Stmt, addToOngoing bool) {
 		if s.Body != nil {
 			for _, inner := range s.Body.List {
 				t.Track(inner, addToOngoing)
+			}
+		}
+	case *ast.SwitchStmt:
+		if s.Body != nil {
+			for _, clause := range s.Body.List {
+				if cc, ok := clause.(*ast.CaseClause); ok {
+					// Track each case with a clone to avoid cross-case contamination
+					caseTracker := t.Clone()
+					for _, inner := range cc.Body {
+						caseTracker.Track(inner, addToOngoing)
+					}
+					// Finalize and merge scopes back
+					caseTracker.EndBlock()
+					t.finished = append(t.finished, caseTracker.finished...)
+				}
+			}
+		}
+	case *ast.TypeSwitchStmt:
+		if s.Body != nil {
+			for _, clause := range s.Body.List {
+				if cc, ok := clause.(*ast.CaseClause); ok {
+					caseTracker := t.Clone()
+					for _, inner := range cc.Body {
+						caseTracker.Track(inner, addToOngoing)
+					}
+					caseTracker.EndBlock()
+					t.finished = append(t.finished, caseTracker.finished...)
+				}
+			}
+		}
+	case *ast.SelectStmt:
+		if s.Body != nil {
+			for _, clause := range s.Body.List {
+				if cc, ok := clause.(*ast.CommClause); ok {
+					caseTracker := t.Clone()
+					for _, inner := range cc.Body {
+						caseTracker.Track(inner, addToOngoing)
+					}
+					caseTracker.EndBlock()
+					t.finished = append(t.finished, caseTracker.finished...)
+				}
 			}
 		}
 	case *ast.BlockStmt:
@@ -328,8 +392,28 @@ func subjectForUnlockCall(node ast.Node) ast.Expr {
 }
 
 func subjectForDeferUnlockCall(node ast.Node) ast.Expr {
-	if deferStmt, ok := node.(*ast.DeferStmt); ok {
-		return SubjectForCall(deferStmt.Call, unlockMethods)
+	deferStmt, ok := node.(*ast.DeferStmt)
+	if !ok {
+		return nil
 	}
+
+	// Check for direct defer m.Unlock()
+	if subject := SubjectForCall(deferStmt.Call, unlockMethods); subject != nil {
+		return subject
+	}
+
+	// Check for defer func() { ... m.Unlock() ... }()
+	funcLit, ok := deferStmt.Call.Fun.(*ast.FuncLit)
+	if !ok || funcLit.Body == nil {
+		return nil
+	}
+
+	// Search for Unlock call inside the closure body
+	for _, stmt := range funcLit.Body.List {
+		if subject := SubjectForCall(stmt, unlockMethods); subject != nil {
+			return subject
+		}
+	}
+
 	return nil
 }

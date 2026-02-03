@@ -64,12 +64,7 @@ func (le LintError) Report(pass *analysis.Pass) {
 	// Add wrapper info if the origin lock was via a wrapper
 	originSuffix := ""
 	if le.originWrapper != nil {
-		wrapperLockPosition := pass.Fset.Position(le.originWrapper.LockPos)
-		originSuffix = fmt.Sprintf(" (via %s at %s:%d)",
-			le.originWrapper.FQN.ShortName(),
-			relativePath(wrapperLockPosition.Filename),
-			wrapperLockPosition.Line,
-		)
+		originSuffix = fmt.Sprintf(" (via %s)", le.originWrapper.FQN.ShortName())
 	}
 
 	pass.Reportf(le.secondLock.Pos(),
@@ -146,12 +141,7 @@ func (e MissingUnlockError) Report(pass *analysis.Pass) {
 	// Add wrapper info if the lock was via a wrapper
 	lockSuffix := ""
 	if e.wrapper != nil {
-		wrapperLockPosition := pass.Fset.Position(e.wrapper.LockPos)
-		lockSuffix = fmt.Sprintf(" (via %s at %s:%d)",
-			e.wrapper.FQN.ShortName(),
-			relativePath(wrapperLockPosition.Filename),
-			wrapperLockPosition.Line,
-		)
+		lockSuffix = fmt.Sprintf(" (via %s)", e.wrapper.FQN.ShortName())
 	}
 
 	pass.Reportf(e.returnPos.Pos(),
