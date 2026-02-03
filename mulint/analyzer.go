@@ -130,15 +130,31 @@ func (a *Analyzer) checkReentrantLocks() {
 }
 
 func (a *Analyzer) checkNodeForReentrantLock(n ast.Node, scope *MutexScope, currentFQN FQN) {
-	// Collect func literals that are passed as arguments to calls.
-	// These may run asynchronously or at unknown times, so we skip analyzing them.
+	// Collect func literals that should be skipped from analysis:
+	// 1. Func literals passed as arguments to calls - may run asynchronously
+	// 2. Func literals that are returned - will be executed by caller after lock is released
+	// 3. Func literals assigned to variables - likely returned or called later
 	// Note: func literals that are called directly (e.g., defer func(){}()) are NOT skipped.
-	funcLitArgs := make(map[*ast.FuncLit]bool)
+	skipFuncLits := make(map[*ast.FuncLit]bool)
 	ast.Inspect(n, func(node ast.Node) bool {
 		if call, ok := node.(*ast.CallExpr); ok {
 			for _, arg := range call.Args {
 				if funcLit, ok := arg.(*ast.FuncLit); ok {
-					funcLitArgs[funcLit] = true
+					skipFuncLits[funcLit] = true
+				}
+			}
+		}
+		if ret, ok := node.(*ast.ReturnStmt); ok {
+			for _, result := range ret.Results {
+				if funcLit, ok := result.(*ast.FuncLit); ok {
+					skipFuncLits[funcLit] = true
+				}
+			}
+		}
+		if assign, ok := node.(*ast.AssignStmt); ok {
+			for _, rhs := range assign.Rhs {
+				if funcLit, ok := rhs.(*ast.FuncLit); ok {
+					skipFuncLits[funcLit] = true
 				}
 			}
 		}
@@ -151,9 +167,9 @@ func (a *Analyzer) checkNodeForReentrantLock(n ast.Node, scope *MutexScope, curr
 		if _, ok := node.(*ast.GoStmt); ok {
 			return false
 		}
-		// Skip func literals passed as arguments - they may run asynchronously
+		// Skip func literals that are passed as arguments or returned
 		if funcLit, ok := node.(*ast.FuncLit); ok {
-			if funcLitArgs[funcLit] {
+			if skipFuncLits[funcLit] {
 				return false
 			}
 		}

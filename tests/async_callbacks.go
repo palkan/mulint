@@ -80,9 +80,7 @@ func (a *async) TransitiveInsideSwitch(val int) {
 	}
 }
 
-// CentrifugePattern - exact pattern from centrifuge/internal/queue/queue.go
-// No defer, manual unlock at end, with early return branch
-func (a *async) CentrifugePattern(delay int) {
+func (a *async) TimeAfter(delay int) {
 	a.mu.Lock()
 
 	if delay == 0 {
@@ -101,4 +99,24 @@ func (a *async) CentrifugePattern(delay int) {
 		a.timer.Reset(time.Second)
 	}
 	a.mu.Unlock()
+}
+
+func (a *async) ReturnCallback() func() error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return func() error {
+		a.helper()
+		return nil
+	}
+}
+
+func (a *async) AssignedCallback() func() error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	fn := func() error {
+		a.helper()
+		return nil
+	}
+
+	return fn
 }
