@@ -25,7 +25,7 @@ func run(pass *analysis.Pass) (interface{}, error) {
 
 	v.AnalyzeAll()
 
-	a := NewAnalyzer(pass, v.Scopes(), v.Calls(), v.Funcs(), v.Wrappers(), pass.TypesInfo)
+	a := NewAnalyzer(pass, v.Scopes(), v.Calls(), v.Funcs(), v.Wrappers(), v.Conditionals(), pass.TypesInfo)
 	a.Analyze()
 
 	for _, e := range a.Errors() {
@@ -49,10 +49,11 @@ type Analyzer struct {
 	reported       map[token.Pos]bool // tracks secondLock positions to avoid duplicates
 	funcs          []*ast.FuncDecl
 	wrappers       *WrapperRegistry
+	conditionals   *ConditionalLockRegistry
 	info           *types.Info
 }
 
-func NewAnalyzer(pass *analysis.Pass, scopes map[FQN]*LockTracker, calls map[FQN][]FQN, funcs []*ast.FuncDecl, wrappers *WrapperRegistry, info *types.Info) *Analyzer {
+func NewAnalyzer(pass *analysis.Pass, scopes map[FQN]*LockTracker, calls map[FQN][]FQN, funcs []*ast.FuncDecl, wrappers *WrapperRegistry, conditionals *ConditionalLockRegistry, info *types.Info) *Analyzer {
 	return &Analyzer{
 		pass:           pass,
 		scopes:         scopes,
@@ -60,6 +61,7 @@ func NewAnalyzer(pass *analysis.Pass, scopes map[FQN]*LockTracker, calls map[FQN
 		reported:       make(map[token.Pos]bool),
 		funcs:          funcs,
 		wrappers:       wrappers,
+		conditionals:   conditionals,
 		info:           info,
 		missingUnlocks: make([]MissingUnlockError, 0),
 	}
@@ -189,6 +191,12 @@ func (a *Analyzer) checkTransitiveReentrantLock(scope *MutexScope, call *ast.Cal
 	}
 
 	fqn := FromCallInfo(pkg, name)
+
+	// Check if this is a conditional lock that won't be taken based on arguments
+	if a.conditionals.ShouldSkipLock(fqn, call, scope.Selector()) {
+		return
+	}
+
 	if a.hasTransitiveLock(fqn, scope, make(map[FQN]bool)) {
 		a.recordError(scope.Pos(), call.Pos(), scope.Wrapper())
 	}

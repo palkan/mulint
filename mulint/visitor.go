@@ -8,22 +8,24 @@ import (
 
 // Visitor collects information about mutex operations from AST traversal.
 type Visitor struct {
-	scopes   map[FQN]*LockTracker
-	calls    map[FQN][]FQN
-	wrappers *WrapperRegistry
-	pkg      *types.Package
-	info     *types.Info
-	funcs    []*ast.FuncDecl
+	scopes       map[FQN]*LockTracker
+	calls        map[FQN][]FQN
+	wrappers     *WrapperRegistry
+	conditionals *ConditionalLockRegistry
+	pkg          *types.Package
+	info         *types.Info
+	funcs        []*ast.FuncDecl
 }
 
 func NewVisitor(pkg *types.Package, info *types.Info) *Visitor {
 	return &Visitor{
-		scopes:   make(map[FQN]*LockTracker),
-		calls:    make(map[FQN][]FQN),
-		wrappers: NewWrapperRegistry(),
-		pkg:      pkg,
-		info:     info,
-		funcs:    make([]*ast.FuncDecl, 0),
+		scopes:       make(map[FQN]*LockTracker),
+		calls:        make(map[FQN][]FQN),
+		wrappers:     NewWrapperRegistry(),
+		conditionals: NewConditionalLockRegistry(info),
+		pkg:          pkg,
+		info:         info,
+		funcs:        make([]*ast.FuncDecl, 0),
 	}
 }
 
@@ -37,12 +39,16 @@ func (v *Visitor) Visit(node ast.Node) ast.Visitor {
 
 // AnalyzeAll performs all analysis passes after AST traversal.
 func (v *Visitor) AnalyzeAll() {
-	// Pass 1: Analyze bodies for direct locks and collect calls
+	// Pass 1: Analyze bodies for direct locks, collect calls, and detect conditional locks
 	for _, fn := range v.funcs {
 		fqn := v.funcFQN(fn)
 		v.analyzeDirectLocks(fqn, fn.Body)
 		v.recordCalls(fqn, fn.Body)
+		v.conditionals.AnalyzeFunc(fqn, fn)
 	}
+
+	// Pass 1.5: Propagate conditional locks through call chains
+	v.conditionals.PropagateConditionalLocks(v.funcs, v.funcFQN)
 
 	// Pass 2: Identify wrapper methods from collected scopes
 	v.wrappers.IdentifyWrappers(v.scopes, v.funcs, v.funcFQN)
@@ -141,4 +147,9 @@ func (v *Visitor) Funcs() []*ast.FuncDecl {
 // Wrappers returns the wrapper registry.
 func (v *Visitor) Wrappers() *WrapperRegistry {
 	return v.wrappers
+}
+
+// Conditionals returns the conditional lock registry.
+func (v *Visitor) Conditionals() *ConditionalLockRegistry {
+	return v.conditionals
 }

@@ -68,3 +68,71 @@ func (s *some) nonUnlockingMethod() {
 func noneStructMethod() {
 	fmt.Println("I'm not doing anything")
 }
+
+// Conditional lock tests - lock is guarded by bool parameter
+
+func (s *some) ConditionalLockCaller() {
+	s.m.Lock()
+	defer s.m.Unlock()
+
+	s.conditionalLockHelper(false) // Should NOT be flagged - lock param is false
+}
+
+func (s *some) conditionalLockHelper(lock bool) {
+	if lock {
+		s.m.Lock()
+		defer s.m.Unlock()
+	}
+	s.sm["conditional"] = 1
+}
+
+func (s *some) ConditionalLockCallerWithTrue() {
+	s.m.Lock()
+	defer s.m.Unlock()
+
+	s.conditionalLockHelper(true) // want "Mutex lock is acquired on this line"
+}
+
+func (s *some) NegatedConditionalLockCaller() {
+	s.m.Lock()
+	defer s.m.Unlock()
+
+	s.negatedConditionalHelper(true) // Should NOT be flagged - !lock is false when lock is true
+}
+
+func (s *some) negatedConditionalHelper(lock bool) {
+	if !lock {
+		s.m.Lock()
+		defer s.m.Unlock()
+	}
+	s.sm["negated"] = 1
+}
+
+func (s *some) NegatedConditionalCallerWithFalse() {
+	s.m.Lock()
+	defer s.m.Unlock()
+
+	s.negatedConditionalHelper(false) // want "Mutex lock is acquired on this line"
+}
+
+// Propagated conditional lock tests - conditional lock through intermediate function
+
+func (s *some) PropagatedConditionalLockCaller() {
+	s.m.Lock()
+	defer s.m.Unlock()
+
+	s.intermediateHelper(false) // Should NOT be flagged - lock propagates as false
+}
+
+func (s *some) intermediateHelper(lock bool) {
+	// This function passes the lock param through to conditionalLockHelper
+	s.sm["intermediate"] = 1
+	s.conditionalLockHelper(lock)
+}
+
+func (s *some) PropagatedConditionalLockCallerWithTrue() {
+	s.m.Lock()
+	defer s.m.Unlock()
+
+	s.intermediateHelper(true) // want "Mutex lock is acquired on this line"
+}
