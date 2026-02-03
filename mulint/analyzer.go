@@ -128,11 +128,32 @@ func (a *Analyzer) checkReentrantLocks() {
 }
 
 func (a *Analyzer) checkNodeForReentrantLock(n ast.Node, scope *MutexScope, currentFQN FQN) {
+	// Collect func literals that are passed as arguments to calls.
+	// These may run asynchronously or at unknown times, so we skip analyzing them.
+	// Note: func literals that are called directly (e.g., defer func(){}()) are NOT skipped.
+	funcLitArgs := make(map[*ast.FuncLit]bool)
+	ast.Inspect(n, func(node ast.Node) bool {
+		if call, ok := node.(*ast.CallExpr); ok {
+			for _, arg := range call.Args {
+				if funcLit, ok := arg.(*ast.FuncLit); ok {
+					funcLitArgs[funcLit] = true
+				}
+			}
+		}
+		return true
+	})
+
 	// Walk the AST to find all CallExpr nodes within this statement
 	ast.Inspect(n, func(node ast.Node) bool {
 		// Skip goroutines - they run asynchronously, lock may be released
 		if _, ok := node.(*ast.GoStmt); ok {
 			return false
+		}
+		// Skip func literals passed as arguments - they may run asynchronously
+		if funcLit, ok := node.(*ast.FuncLit); ok {
+			if funcLitArgs[funcLit] {
+				return false
+			}
 		}
 		if call, ok := node.(*ast.CallExpr); ok {
 			a.checkDirectReentrantLock(scope, call)
