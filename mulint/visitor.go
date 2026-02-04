@@ -69,7 +69,7 @@ func (v *Visitor) AnalyzeAll() {
 
 // analyzeDirectLocks analyzes a function body for direct lock/unlock calls.
 func (v *Visitor) analyzeDirectLocks(fqn FQN, body *ast.BlockStmt) {
-	tracker := NewLockTracker()
+	tracker := NewLockTrackerWithInfo(v.info)
 
 	for _, stmt := range body.List {
 		tracker.Track(stmt, true)

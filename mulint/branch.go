@@ -86,12 +86,15 @@ func (t *BranchTracker) AnalyzeStatements(stmts []ast.Stmt) {
 func (t *BranchTracker) analyzeStmt(stmt ast.Stmt) {
 	// Check for lock acquisition (direct)
 	if e := subjectForLockCall(stmt); e != nil {
-		selector := StrExpr(e)
-		if _, exists := t.ongoing[selector]; !exists {
-			t.ongoing[selector] = BranchLockInfo{
-				selector: selector,
-				pos:      stmt.Pos(),
-				wrapper:  nil,
+		// Only track if it's actually a sync.Mutex or sync.RWMutex
+		if IsMutexType(e, t.typeInfo) {
+			selector := StrExpr(e)
+			if _, exists := t.ongoing[selector]; !exists {
+				t.ongoing[selector] = BranchLockInfo{
+					selector: selector,
+					pos:      stmt.Pos(),
+					wrapper:  nil,
+				}
 			}
 		}
 	}
@@ -101,8 +104,10 @@ func (t *BranchTracker) analyzeStmt(stmt ast.Stmt) {
 
 	// Check for deferred unlock (direct)
 	if e := subjectForDeferUnlockCall(stmt); e != nil {
-		selector := StrExpr(e)
-		t.defers[selector] = true
+		if IsMutexType(e, t.typeInfo) {
+			selector := StrExpr(e)
+			t.defers[selector] = true
+		}
 	}
 
 	// Check for deferred wrapper unlock
@@ -110,8 +115,10 @@ func (t *BranchTracker) analyzeStmt(stmt ast.Stmt) {
 
 	// Check for direct unlock
 	if e := subjectForUnlockCall(stmt); e != nil {
-		selector := StrExpr(e)
-		delete(t.ongoing, selector)
+		if IsMutexType(e, t.typeInfo) {
+			selector := StrExpr(e)
+			delete(t.ongoing, selector)
+		}
 	}
 
 	// Check for wrapper unlock call

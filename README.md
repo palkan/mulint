@@ -1,6 +1,6 @@
 # mulint
 
-A Go linter that detects potential deadlocks caused by mutexes.
+A Go linter that detects mutex misuses (or _self-deadlocks_) such as reentrant lock and missing Unlock()-s.
 
 ## Installation
 
@@ -22,7 +22,7 @@ The tool uses `golang.org/x/tools/go/analysis`, so standard Go package patterns 
 ## What It Detects
 
 > [!NOTE]
-> If you found a false negative, please, [open an issue](https://github.com/palkan/mulint/issues)!
+> If you found a false positive, please, [open an issue](https://github.com/palkan/mulint/issues)!
 
 ### Recursive locks
 
@@ -57,7 +57,7 @@ Examples:
   }
 	```
 
-- Locks without unlock (potential deadlock source)
+- Locks without unlock (potential self-deadlock)
 
   ```go
   func (s *Service) Process() {

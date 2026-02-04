@@ -5,6 +5,7 @@ import (
 	"go/ast"
 	"go/printer"
 	"go/token"
+	"go/types"
 )
 
 // StrExpr converts an AST expression to its string representation.
@@ -96,4 +97,42 @@ func SelectorExpr(call *ast.CallExpr) *ast.SelectorExpr {
 		return sel
 	}
 	return nil
+}
+
+// IsMutexType checks if the given expression's type is sync.Mutex or sync.RWMutex.
+func IsMutexType(expr ast.Expr, info *types.Info) bool {
+	if info == nil {
+		return true // If no type info, assume it could be a mutex
+	}
+
+	t := info.TypeOf(expr)
+	if t == nil {
+		return true // If type unknown, assume it could be a mutex
+	}
+
+	return isMutexTypeName(t)
+}
+
+// isMutexTypeName checks if a type is sync.Mutex or sync.RWMutex.
+func isMutexTypeName(t types.Type) bool {
+	// Handle pointer types
+	if ptr, ok := t.(*types.Pointer); ok {
+		t = ptr.Elem()
+	}
+
+	// Get the named type
+	named, ok := t.(*types.Named)
+	if !ok {
+		return false
+	}
+
+	obj := named.Obj()
+	if obj == nil || obj.Pkg() == nil {
+		return false
+	}
+
+	pkgPath := obj.Pkg().Path()
+	typeName := obj.Name()
+
+	return pkgPath == "sync" && (typeName == "Mutex" || typeName == "RWMutex")
 }

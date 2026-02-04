@@ -188,6 +188,11 @@ func (a *Analyzer) checkDirectReentrantLock(scope *MutexScope, call *ast.CallExp
 		return
 	}
 
+	// Only flag if the receiver is actually a sync.Mutex or sync.RWMutex
+	if !IsMutexType(subject, a.info) {
+		return
+	}
+
 	selector := StrExpr(subject)
 	if selector == scope.Selector() {
 		a.recordError(scope.Pos(), call.Pos(), scope.Wrapper())

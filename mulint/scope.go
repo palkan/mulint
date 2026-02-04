@@ -3,6 +3,7 @@ package mulint
 import (
 	"go/ast"
 	"go/token"
+	"go/types"
 )
 
 // WrapperInfo contains information about a wrapper method that was used to acquire a lock.
@@ -82,6 +83,7 @@ type LockTracker struct {
 	onGoing  map[string]*MutexScope
 	defers   map[string]bool
 	finished []*MutexScope
+	info     *types.Info // Optional type info for filtering non-mutex Lock calls
 
 	// For future checks: track unlocks without matching locks
 	// unmatchedUnlocks []UnlockInfo
@@ -92,6 +94,16 @@ func NewLockTracker() *LockTracker {
 		onGoing:  make(map[string]*MutexScope),
 		defers:   make(map[string]bool),
 		finished: make([]*MutexScope, 0),
+		info:     nil,
+	}
+}
+
+func NewLockTrackerWithInfo(info *types.Info) *LockTracker {
+	return &LockTracker{
+		onGoing:  make(map[string]*MutexScope),
+		defers:   make(map[string]bool),
+		finished: make([]*MutexScope, 0),
+		info:     info,
 	}
 }
 
@@ -101,6 +113,7 @@ func (t *LockTracker) Clone() *LockTracker {
 		onGoing:  make(map[string]*MutexScope, len(t.onGoing)),
 		defers:   make(map[string]bool, len(t.defers)),
 		finished: make([]*MutexScope, 0),
+		info:     t.info,
 	}
 	for k, v := range t.onGoing {
 		clone.onGoing[k] = v
@@ -122,27 +135,34 @@ func (t *LockTracker) Track(stmt ast.Stmt, addToOngoing bool) {
 
 	// Check for lock acquisition
 	if e := subjectForLockCall(stmt); e != nil {
-		selector := StrExpr(e)
-		if _, exists := t.onGoing[selector]; !exists {
-			t.onGoing[selector] = NewMutexScope(selector, stmt.Pos())
+		// Only track if it's actually a sync.Mutex or sync.RWMutex
+		if IsMutexType(e, t.info) {
+			selector := StrExpr(e)
+			if _, exists := t.onGoing[selector]; !exists {
+				t.onGoing[selector] = NewMutexScope(selector, stmt.Pos())
+			}
 		}
 	}
 
 	// Check for deferred unlock
 	if e := subjectForDeferUnlockCall(stmt); e != nil {
-		selector := StrExpr(e)
-		t.defers[selector] = true
+		if IsMutexType(e, t.info) {
+			selector := StrExpr(e)
+			t.defers[selector] = true
+		}
 	}
 
 	// Check for unlock
 	if e := subjectForUnlockCall(stmt); e != nil {
-		selector := StrExpr(e)
-		if scope, ok := t.onGoing[selector]; ok {
-			scope.markUnlocked()
-			t.finished = append(t.finished, scope)
-			delete(t.onGoing, selector)
+		if IsMutexType(e, t.info) {
+			selector := StrExpr(e)
+			if scope, ok := t.onGoing[selector]; ok {
+				scope.markUnlocked()
+				t.finished = append(t.finished, scope)
+				delete(t.onGoing, selector)
+			}
+			// Future: else track as unmatched unlock
 		}
-		// Future: else track as unmatched unlock
 	}
 
 	// Recurse into nested blocks

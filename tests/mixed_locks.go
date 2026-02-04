@@ -4,9 +4,18 @@ import (
 	"sync"
 )
 
+type Resolver struct {
+	locked bool
+}
+
+func (r *Resolver) Lock() {
+	r.locked = true
+}
+
 type mixed struct {
 	m  sync.RWMutex
 	m2 sync.Mutex
+	r  *Resolver
 
 	counter int
 }
@@ -42,4 +51,10 @@ func (m *mixed) VariedStructs() {
 	another.Test()
 
 	m.m.Unlock()
+}
+
+func (m *mixed) TestNotMutextLock() error {
+	m.r.Lock()
+
+	return nil
 }
