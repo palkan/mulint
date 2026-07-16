@@ -149,17 +149,32 @@ func (t *BranchTracker) analyzeNestedStmt(stmt ast.Stmt) {
 		// Fork for else body if exists
 		if s.Else != nil {
 			elseTracker := t.Clone()
+			elseFalls := true
 			switch e := s.Else.(type) {
 			case *ast.BlockStmt:
 				elseTracker.AnalyzeStatements(e.List)
+				elseFalls = !blockTerminates(e.List)
 			case *ast.IfStmt:
 				elseTracker.analyzeStmt(e)
 			}
+
+			// Merge point: a lock released on every branch that can fall
+			// through is no longer held after the if/else. A branch that
+			// terminates (ends in return) doesn't constrain the merged
+			// state — its returns were already checked inside the branch.
+			ifFalls := !blockTerminates(s.Body.List)
+			for selector := range t.ongoing {
+				_, heldIf := ifTracker.ongoing[selector]
+				_, heldElse := elseTracker.ongoing[selector]
+				stillHeld := (ifFalls && heldIf) || (elseFalls && heldElse)
+				if !stillHeld && (ifFalls || elseFalls) {
+					delete(t.ongoing, selector)
+				}
+			}
 		}
 
-		// After if/else, the lock state is uncertain (could be either branch)
-		// We keep the original state since we can't merge branches
-		// The errors are already collected in each branch
+		// Without an else, the fall-through path (condition false) keeps the
+		// original state, so no merge is possible.
 
 	case *ast.ForStmt:
 		if s.Init != nil {
@@ -213,6 +228,16 @@ func (t *BranchTracker) analyzeNestedStmt(stmt ast.Stmt) {
 	case *ast.BlockStmt:
 		t.AnalyzeStatements(s.List)
 	}
+}
+
+// blockTerminates reports whether a statement list always transfers control
+// away from the enclosing block (best-effort: ends in a return statement).
+func blockTerminates(stmts []ast.Stmt) bool {
+	if len(stmts) == 0 {
+		return false
+	}
+	_, ok := stmts[len(stmts)-1].(*ast.ReturnStmt)
+	return ok
 }
 
 // checkReturnWithLocks checks if there are held locks when returning.

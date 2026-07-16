@@ -4,6 +4,7 @@ import (
 	"go/ast"
 	"go/token"
 	"go/types"
+	"strings"
 
 	"golang.org/x/tools/go/analysis"
 )
@@ -224,24 +225,33 @@ func (a *Analyzer) checkTransitiveReentrantLock(scope *MutexScope, call *ast.Cal
 }
 
 // isCallOnDifferentReceiver checks if a method call is on a different receiver
-// than the one used in the mutex scope.
+// than the one that owns the mutex in the scope.
+//
+// The mutex owner is the scope selector minus its final field ("c.mu" -> "c",
+// "c.pconn.mu" -> "c.pconn"). A callee can only re-acquire the caller's mutex
+// through its own receiver when that receiver is the owner or contains it
+// ("c" may reach "c.b.mu"; "c.pconn" cannot reach "c.mu" — its "c.mu" is a
+// different object that merely shares receiver and field names).
 func (a *Analyzer) isCallOnDifferentReceiver(call *ast.CallExpr, scope *MutexScope) bool {
 	selector := SelectorExpr(call)
 	if selector == nil {
 		return false
 	}
 
-	callReceiver := RootSelector(selector)
-	if callReceiver == nil {
-		return false
+	sel := scope.Selector()
+	idx := strings.LastIndex(sel, ".")
+	if idx < 0 {
+		// Package-level mutex: compare against the receiver's root identifier.
+		callReceiver := RootSelector(selector)
+		if callReceiver == nil {
+			return false
+		}
+		return callReceiver.Name != sel
 	}
 
-	scopeRoot, _ := SplitSelector(scope.Selector())
-	if scopeRoot == "" {
-		return false
-	}
-
-	return callReceiver.Name != scopeRoot
+	ownerPath := sel[:idx]
+	recvPath := StrExpr(selector.X)
+	return recvPath != ownerPath && !strings.HasPrefix(ownerPath, recvPath+".")
 }
 
 // hasTransitiveLock checks if a function (or its callees) locks the same mutex.
