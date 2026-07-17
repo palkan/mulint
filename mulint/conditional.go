@@ -2,6 +2,7 @@ package mulint
 
 import (
 	"go/ast"
+	"go/token"
 	"go/types"
 )
 
@@ -19,6 +20,9 @@ type ConditionalLock struct {
 	ParamName  string // Name of the parameter
 	Selector   string // The mutex selector (e.g., "a.mu")
 	Negated    bool   // True if condition is negated (if !lock)
+	Balanced   bool   // True if guarded unlocks balance the guarded locks:
+	// the function is self-contained for any argument value and must not be
+	// classified as a lock-acquiring wrapper.
 }
 
 // ConditionalLockRegistry tracks functions with conditional locks.
@@ -40,16 +44,109 @@ func (r *ConditionalLockRegistry) Get(fqn FQN) []ConditionalLock {
 }
 
 // AnalyzeFunc analyzes a function for conditional lock patterns.
+// Guards are recognized at any nesting depth (e.g. nats-server's
+// pubAllowedFullCheck buries `if !hasLock { c.mu.Lock() }` inside another
+// condition). Registration is conservative — skipping a call site based on a
+// literal argument is only sound when:
+//   - the parameter is never reassigned in the body (its value at guard time
+//     is the call-site value), and
+//   - every acquisition of that mutex in the function is covered by the same
+//     param+negation guard (no unguarded Lock that would run regardless).
 func (r *ConditionalLockRegistry) AnalyzeFunc(fqn FQN, fn *ast.FuncDecl) {
-	if fn.Type.Params == nil {
+	if fn.Type.Params == nil || fn.Body == nil {
 		return
 	}
 
-	// Build map of bool parameter names to their indices
+	boolParams := collectBoolParams(fn.Type.Params)
+	if len(boolParams) == 0 {
+		return
+	}
+
+	removeReassignedParams(fn.Body, boolParams)
+	if len(boolParams) == 0 {
+		return
+	}
+
+	// Find guards at any depth and record which lock/unlock sites they cover.
+	type guardKey struct {
+		param    string
+		negated  bool
+		selector string
+	}
+	guarded := make(map[guardKey]map[token.Pos]bool)
+	guardedUnlocks := make(map[guardKey]int)
+
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		ifStmt, ok := n.(*ast.IfStmt)
+		if !ok {
+			return true
+		}
+
+		paramName, negated := extractBoolParamCondition(ifStmt.Cond, boolParams)
+		if paramName == "" {
+			return true
+		}
+
+		for selector, positions := range findLockSites(ifStmt.Body) {
+			key := guardKey{paramName, negated, selector}
+			if guarded[key] == nil {
+				guarded[key] = make(map[token.Pos]bool)
+			}
+			for _, pos := range positions {
+				guarded[key][pos] = true
+			}
+		}
+		for selector, positions := range findMutexCallSites(ifStmt.Body, unlockMethods) {
+			guardedUnlocks[guardKey{paramName, negated, selector}] += len(positions)
+		}
+		return true
+	})
+
+	if len(guarded) == 0 {
+		return
+	}
+
+	allSites := findLockSites(fn.Body)
+
+	for key, positions := range guarded {
+		exclusive := true
+		for _, pos := range allSites[key.selector] {
+			if !positions[pos] {
+				exclusive = false
+				break
+			}
+		}
+		if !exclusive {
+			continue
+		}
+
+		r.locks[fqn] = append(r.locks[fqn], ConditionalLock{
+			ParamIndex: boolParams[key.param],
+			ParamName:  key.param,
+			Selector:   key.selector,
+			Negated:    key.negated,
+			Balanced:   guardedUnlocks[key] >= len(positions),
+		})
+	}
+}
+
+// HasBalancedPair reports whether the function has a balanced conditional
+// lock/unlock pair for the given selector — i.e. it is self-contained for
+// any argument value and must not be treated as a lock-acquiring wrapper.
+func (r *ConditionalLockRegistry) HasBalancedPair(fqn FQN, selector string) bool {
+	for _, cl := range r.locks[fqn] {
+		if cl.Selector == selector && cl.Balanced {
+			return true
+		}
+	}
+	return false
+}
+
+// collectBoolParams maps bool parameter names to their positional indices.
+func collectBoolParams(params *ast.FieldList) map[string]int {
 	boolParams := make(map[string]int)
 	paramIndex := 0
-	for _, field := range fn.Type.Params.List {
-		// Check if this is a bool type
+	for _, field := range params.List {
 		if ident, ok := field.Type.(*ast.Ident); ok && ident.Name == "bool" {
 			for _, name := range field.Names {
 				boolParams[name.Name] = paramIndex
@@ -62,36 +159,53 @@ func (r *ConditionalLockRegistry) AnalyzeFunc(fqn FQN, fn *ast.FuncDecl) {
 			}
 		}
 	}
+	return boolParams
+}
 
-	if len(boolParams) == 0 {
-		return
-	}
+// removeReassignedParams drops parameters whose value may change inside the
+// body: assigned to, or having their address taken.
+func removeReassignedParams(body *ast.BlockStmt, boolParams map[string]int) {
+	ast.Inspect(body, func(n ast.Node) bool {
+		switch s := n.(type) {
+		case *ast.AssignStmt:
+			for _, lhs := range s.Lhs {
+				if id, ok := lhs.(*ast.Ident); ok {
+					delete(boolParams, id.Name)
+				}
+			}
+		case *ast.UnaryExpr:
+			if s.Op == token.AND {
+				if id, ok := s.X.(*ast.Ident); ok {
+					delete(boolParams, id.Name)
+				}
+			}
+		}
+		return true
+	})
+}
 
-	// Look for if statements that check a bool parameter and contain a lock
-	for _, stmt := range fn.Body.List {
-		ifStmt, ok := stmt.(*ast.IfStmt)
+// findLockSites returns the position of every Lock/RLock call per selector
+// within the node, at any depth.
+func findLockSites(root ast.Node) map[string][]token.Pos {
+	return findMutexCallSites(root, lockMethods)
+}
+
+// findMutexCallSites returns the position of every call to one of the given
+// mutex methods per selector within the node, at any depth.
+func findMutexCallSites(root ast.Node, methods []string) map[string][]token.Pos {
+	sites := make(map[string][]token.Pos)
+	ast.Inspect(root, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
 		if !ok {
-			continue
+			return true
 		}
-
-		paramName, negated := extractBoolParamCondition(ifStmt.Cond, boolParams)
-		if paramName == "" {
-			continue
+		if subject := SubjectForCall(call, methods); subject != nil {
+			selector := StrExpr(subject)
+			sites[selector] = append(sites[selector], call.Pos())
 		}
-
-		// Check if the if body contains a lock
-		selector := findLockInBlock(ifStmt.Body)
-		if selector == "" {
-			continue
-		}
-
-		r.locks[fqn] = append(r.locks[fqn], ConditionalLock{
-			ParamIndex: boolParams[paramName],
-			ParamName:  paramName,
-			Selector:   selector,
-			Negated:    negated,
-		})
-	}
+		return true
+	})
+	return sites
 }
 
 // PropagateConditionalLocks propagates conditional locks through intermediate functions.
@@ -116,22 +230,7 @@ func (r *ConditionalLockRegistry) PropagateConditionalLocks(funcs []*ast.FuncDec
 			fqn := funcFQN(fn)
 
 			// Build map of bool parameter names to their indices for this function
-			boolParams := make(map[string]int)
-			paramIndex := 0
-			for _, field := range fn.Type.Params.List {
-				if ident, ok := field.Type.(*ast.Ident); ok && ident.Name == "bool" {
-					for _, name := range field.Names {
-						boolParams[name.Name] = paramIndex
-						paramIndex++
-					}
-				} else {
-					paramIndex += len(field.Names)
-					if len(field.Names) == 0 {
-						paramIndex++
-					}
-				}
-			}
-
+			boolParams := collectBoolParams(fn.Type.Params)
 			if len(boolParams) == 0 {
 				continue
 			}
@@ -222,22 +321,6 @@ func extractBoolParamCondition(cond ast.Expr, boolParams map[string]int) (string
 		}
 	}
 	return "", false
-}
-
-// findLockInBlock searches for a Lock() call in a block and returns its selector.
-func findLockInBlock(block *ast.BlockStmt) string {
-	for _, stmt := range block.List {
-		if subject := SubjectForCall(stmt, lockMethods); subject != nil {
-			return StrExpr(subject)
-		}
-		// Also check deferred locks
-		if deferStmt, ok := stmt.(*ast.DeferStmt); ok {
-			if subject := SubjectForCall(deferStmt.Call, lockMethods); subject != nil {
-				return StrExpr(subject)
-			}
-		}
-	}
-	return ""
 }
 
 // ShouldSkipLock checks if a transitive lock should be skipped based on the call arguments.

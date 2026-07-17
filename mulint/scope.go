@@ -12,13 +12,23 @@ type WrapperInfo struct {
 	LockPos token.Pos // Position of the actual Lock() call inside the wrapper
 }
 
+// releaseKind records how a mutex scope was released.
+type releaseKind int
+
+const (
+	releaseNone     releaseKind = iota // never released (potential leak)
+	releaseDirect                      // released by a plain Unlock() call
+	releaseDeferred                    // released by a deferred unlock at function exit
+)
+
 // MutexScope represents a region of code where a mutex is held.
 // It tracks the lock position and all statements executed while holding the lock.
 type MutexScope struct {
 	selector string
 	pos      token.Pos
 	nodes    []ast.Node
-	unlocked bool        // true if the scope was properly unlocked (deferred or direct)
+	unlocked bool         // true if the scope was properly unlocked (deferred or direct)
+	released releaseKind  // how the scope was released
 	wrapper  *WrapperInfo // non-nil if the lock was acquired via a wrapper method
 }
 
@@ -68,8 +78,24 @@ func (s *MutexScope) IsUnlocked() bool {
 	return s.unlocked
 }
 
-func (s *MutexScope) markUnlocked() {
+// ReleasedDirectly returns true if the scope was released by a plain Unlock()
+// call (not a deferred one): the mutex is free before any defers run.
+func (s *MutexScope) ReleasedDirectly() bool {
+	return s.released == releaseDirect
+}
+
+func (s *MutexScope) markUnlockedDirect() {
 	s.unlocked = true
+	if s.released == releaseNone {
+		s.released = releaseDirect
+	}
+}
+
+func (s *MutexScope) markUnlockedDeferred() {
+	s.unlocked = true
+	if s.released == releaseNone {
+		s.released = releaseDeferred
+	}
 }
 
 // Wrapper returns the wrapper info if the lock was acquired via a wrapper, nil otherwise.
@@ -144,8 +170,8 @@ func (t *LockTracker) Track(stmt ast.Stmt, addToOngoing bool) {
 		}
 	}
 
-	// Check for deferred unlock
-	if e := subjectForDeferUnlockCall(stmt); e != nil {
+	// Check for deferred unlocks
+	for _, e := range subjectsForDeferUnlockCall(stmt) {
 		if IsMutexType(e, t.info) {
 			selector := StrExpr(e)
 			t.defers[selector] = true
@@ -157,7 +183,7 @@ func (t *LockTracker) Track(stmt ast.Stmt, addToOngoing bool) {
 		if IsMutexType(e, t.info) {
 			selector := StrExpr(e)
 			if scope, ok := t.onGoing[selector]; ok {
-				scope.markUnlocked()
+				scope.markUnlockedDirect()
 				t.finished = append(t.finished, scope)
 				delete(t.onGoing, selector)
 			}
@@ -346,7 +372,7 @@ func (t *LockTracker) StartLockWithWrapper(selector string, pos token.Pos, wrapp
 // EndLock finishes a lock scope, moving it to finished.
 func (t *LockTracker) EndLock(selector string) {
 	if scope, ok := t.onGoing[selector]; ok {
-		scope.markUnlocked()
+		scope.markUnlockedDirect()
 		t.finished = append(t.finished, scope)
 		delete(t.onGoing, selector)
 	}
@@ -363,7 +389,7 @@ func (t *LockTracker) EndBlock() {
 	// Process deferred unlocks - these are properly unlocked
 	for selector := range t.defers {
 		if scope, ok := t.onGoing[selector]; ok {
-			scope.markUnlocked()
+			scope.markUnlockedDeferred()
 			t.finished = append(t.finished, scope)
 			delete(t.onGoing, selector)
 		}
@@ -411,7 +437,14 @@ func subjectForUnlockCall(node ast.Node) ast.Expr {
 	return SubjectForCall(node, unlockMethods)
 }
 
-func subjectForDeferUnlockCall(node ast.Node) ast.Expr {
+// subjectsForDeferUnlockCall returns the mutexes released by a defer
+// statement: a direct `defer m.Unlock()`, or every mutex whose net effect
+// inside a deferred closure is a release — at any nesting depth, so
+// sentinel-guarded unlocks (`if !unlocked { m.Unlock() }`) are recognized.
+// A mutex with as many Locks as Unlocks inside the closure is NOT released
+// by it: such a closure (e.g. a deferred re-acquire to persist state at
+// exit) closes its own lock, not the caller's.
+func subjectsForDeferUnlockCall(node ast.Node) []ast.Expr {
 	deferStmt, ok := node.(*ast.DeferStmt)
 	if !ok {
 		return nil
@@ -419,7 +452,7 @@ func subjectForDeferUnlockCall(node ast.Node) ast.Expr {
 
 	// Check for direct defer m.Unlock()
 	if subject := SubjectForCall(deferStmt.Call, unlockMethods); subject != nil {
-		return subject
+		return []ast.Expr{subject}
 	}
 
 	// Check for defer func() { ... m.Unlock() ... }()
@@ -428,12 +461,30 @@ func subjectForDeferUnlockCall(node ast.Node) ast.Expr {
 		return nil
 	}
 
-	// Search for Unlock call inside the closure body
-	for _, stmt := range funcLit.Body.List {
-		if subject := SubjectForCall(stmt, unlockMethods); subject != nil {
-			return subject
+	unlockSubjects := make(map[string]ast.Expr)
+	unlockCounts := make(map[string]int)
+	lockCounts := make(map[string]int)
+	ast.Inspect(funcLit.Body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		if s := SubjectForCall(call, unlockMethods); s != nil {
+			selector := StrExpr(s)
+			unlockSubjects[selector] = s
+			unlockCounts[selector]++
+		}
+		if s := SubjectForCall(call, lockMethods); s != nil {
+			lockCounts[StrExpr(s)]++
+		}
+		return true
+	})
+
+	var subjects []ast.Expr
+	for selector, expr := range unlockSubjects {
+		if unlockCounts[selector] > lockCounts[selector] {
+			subjects = append(subjects, expr)
 		}
 	}
-
-	return nil
+	return subjects
 }

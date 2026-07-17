@@ -97,6 +97,90 @@ Examples:
   }
   ```
 
+- Deferred re-locks that run while the lock is still held (defers run LIFO):
+
+  ```go
+  func (s *Service) Process() {
+      s.mu.Lock()
+      defer s.mu.Unlock() // registered first — runs LAST
+
+      defer func() {
+          s.mu.Lock() // ERROR: runs before the deferred Unlock above
+          s.stats++
+          s.mu.Unlock()
+      }()
+  }
+  ```
+
+  ...while a deferred re-lock after a manual release is fine:
+
+  ```go
+  s.mu.Lock()
+  defer func() {
+      s.mu.Lock() // OK: runs at exit, after the Unlock below
+      s.saveWriteError()
+      s.mu.Unlock()
+  }()
+  // ...
+  s.mu.Unlock()
+  ```
+
+- Conditional locks guarded by a bool parameter are tracked (at any nesting depth):
+
+  ```go
+  func (s *Service) update(hasLock bool) {
+      if !hasLock {
+          s.mu.Lock()
+      }
+      // ...
+      if !hasLock {
+          s.mu.Unlock()
+      }
+  }
+
+  s.mu.Lock()
+  s.update(true)  // OK: no lock is taken with hasLock=true
+  s.update(false) // ERROR: recursive lock
+  ```
+
+- Guarded defers (defer safety + early release):
+
+  ```go
+  s.mu.Lock()
+  unlocked := false
+  defer func() {
+      if !unlocked {
+          s.mu.Unlock()
+      }
+  }()
+
+  if s.cached() {
+      return nil // OK: covered by the deferred unlock
+  }
+
+  s.mu.Unlock()
+  unlocked = true
+  ```
+
+- Local unlock closures on error paths:
+
+  ```go
+  s.mu.Lock()
+  cleanup := func() {
+      s.dirty = false
+      s.mu.Unlock()
+  }
+
+  if err != nil {
+      cleanup()
+      return err // OK: released by the closure
+  }
+  ```
+
+- Other recognized-safe shapes: a lock released on both branches of an
+  if/else, `Acquire`/`Release`-style wrapper methods, and locks on distinct
+  objects that share a field name (`c.mu` vs `c.conn.mu`).
+
 - Recursive `RLock()` (see below):
 
   ```go
@@ -123,6 +207,17 @@ Go's `sync.RWMutex` documentation states:
 This isn't enforced by the compiler or runtime, making it easy to accidentally introduce deadlocks.
 
 Read also: [What could Go wrong with a mutex, or the Go profiling story](https://evilmartians.com/chronicles/what-could-go-wrong-with-a-mutex-or-the-go-profiling-story).
+
+## Known False Positives
+
+Patterns mulint cannot prove safe yet — expect a report and judge for
+yourself:
+
+- Cross-function lock ownership. Acquiring in one function and releasing in another can be reported as a missing unlock
+- Conditional locks keyed on struct fields, such as `if !p.nodeScope { p.mu.Lock() }`
+- Closure cascades.
+
+Found another? Please [open an issue](https://github.com/palkan/mulint/issues)!
 
 ## Limitations
 

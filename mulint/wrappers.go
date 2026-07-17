@@ -62,7 +62,7 @@ func (r *WrapperRegistry) IsUnlockWrapper(fqn FQN) bool {
 }
 
 // IdentifyWrappers scans collected scopes and function bodies to identify wrapper methods.
-func (r *WrapperRegistry) IdentifyWrappers(scopes map[FQN]*LockTracker, funcs []*ast.FuncDecl, fqnFunc func(*ast.FuncDecl) FQN) {
+func (r *WrapperRegistry) IdentifyWrappers(scopes map[FQN]*LockTracker, funcs []*ast.FuncDecl, fqnFunc func(*ast.FuncDecl) FQN, conditionals *ConditionalLockRegistry) {
 	// A locking wrapper is a function that locks a mutex but does NOT unlock it.
 	// Functions that lock AND unlock (like doSomeWork with defer unlock) are self-contained
 	// and should not be treated as locking wrappers.
@@ -70,6 +70,13 @@ func (r *WrapperRegistry) IdentifyWrappers(scopes map[FQN]*LockTracker, funcs []
 		for _, scope := range tracker.Scopes() {
 			// Only consider scopes that were NOT properly unlocked
 			if scope.IsUnlocked() {
+				continue
+			}
+			// A guarded balanced pair (`if lock { Lock } ... if lock { Unlock }`)
+			// leaves an un-unlocked scope behind because the guarded Unlock lives
+			// in a branch the tracker can't connect — but the function is
+			// self-contained for any argument value, not a lock wrapper.
+			if conditionals != nil && conditionals.HasBalancedPair(fqn, scope.Selector()) {
 				continue
 			}
 			_, mutexField := SplitSelector(scope.Selector())

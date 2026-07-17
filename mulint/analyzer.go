@@ -92,6 +92,7 @@ func (a *Analyzer) checkMissingUnlocks() {
 		}
 
 		tracker := NewBranchTrackerWithWrappers(a.wrappers, a.info)
+		tracker.SetLocalClosures(AnalyzeLocalClosures(fn.Body, a.info))
 		tracker.AnalyzeStatements(fn.Body.List)
 
 		for _, err := range tracker.Errors() {
@@ -123,14 +124,62 @@ func (a *Analyzer) checkMissingUnlocks() {
 func (a *Analyzer) checkReentrantLocks() {
 	for fqn, tracker := range a.scopes {
 		for _, scope := range tracker.Scopes() {
+			safeDefers := a.safeDeferredStmts(scope)
 			for _, node := range scope.Nodes() {
-				a.checkNodeForReentrantLock(node, scope, fqn)
+				a.checkNodeForReentrantLock(node, scope, fqn, safeDefers)
 			}
 		}
 	}
 }
 
-func (a *Analyzer) checkNodeForReentrantLock(n ast.Node, scope *MutexScope, currentFQN FQN) {
+// safeDeferredStmts simulates the defer stack for the scope's mutex: a defer
+// registered inside the critical section runs at function exit, not at its
+// lexical position, so a Lock inside it is only a self-deadlock if the mutex
+// can still be held when the defer fires. A defer is safe when:
+//   - the scope is released by a plain Unlock() (the mutex is free before any
+//     defers run), or
+//   - a deferred unlock of the same mutex is registered AFTER this defer —
+//     defers run LIFO, so the unlock fires first.
+//
+// A deferred unlock registered BEFORE the defer (it would run after — real
+// LIFO deadlock) or a scope that is never released keeps the report.
+func (a *Analyzer) safeDeferredStmts(scope *MutexScope) map[*ast.DeferStmt]bool {
+	var deferStmts []*ast.DeferStmt
+	var unlockPositions []token.Pos
+
+	for _, node := range scope.Nodes() {
+		ds, ok := node.(*ast.DeferStmt)
+		if !ok {
+			continue
+		}
+		deferStmts = append(deferStmts, ds)
+		for _, e := range subjectsForDeferUnlockCall(ds) {
+			if StrExpr(e) == scope.Selector() {
+				unlockPositions = append(unlockPositions, ds.Pos())
+			}
+		}
+	}
+	if len(deferStmts) == 0 {
+		return nil
+	}
+
+	safe := make(map[*ast.DeferStmt]bool)
+	for _, ds := range deferStmts {
+		if scope.ReleasedDirectly() {
+			safe[ds] = true
+			continue
+		}
+		for _, pos := range unlockPositions {
+			if pos > ds.Pos() {
+				safe[ds] = true
+				break
+			}
+		}
+	}
+	return safe
+}
+
+func (a *Analyzer) checkNodeForReentrantLock(n ast.Node, scope *MutexScope, currentFQN FQN, safeDefers map[*ast.DeferStmt]bool) {
 	// Collect func literals that should be skipped from analysis:
 	// 1. Func literals passed as arguments to calls - may run asynchronously
 	// 2. Func literals that are returned - will be executed by caller after lock is released
@@ -166,6 +215,10 @@ func (a *Analyzer) checkNodeForReentrantLock(n ast.Node, scope *MutexScope, curr
 	ast.Inspect(n, func(node ast.Node) bool {
 		// Skip goroutines - they run asynchronously, lock may be released
 		if _, ok := node.(*ast.GoStmt); ok {
+			return false
+		}
+		// Skip defers that provably run after the mutex is released
+		if ds, ok := node.(*ast.DeferStmt); ok && safeDefers[ds] {
 			return false
 		}
 		// Skip func literals that are passed as arguments or returned

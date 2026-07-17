@@ -21,6 +21,9 @@ func Test_MixedLocks(t *testing.T) {
 		"tests/instance_locks.go":      LoadFile("instance_locks.go"),
 		"tests/merge_locks.go":         LoadFile("merge_locks.go"),
 		"tests/fp_shapes.go":           LoadFile("fp_shapes.go"),
+		"tests/conditional_locks.go":   LoadFile("conditional_locks.go"),
+		"tests/defer_locks.go":         LoadFile("defer_locks.go"),
+		"tests/closure_locks.go":       LoadFile("closure_locks.go"),
 	}
 	dir, cleanup, err := analysistest.WriteFiles(filemap)
 	if err != nil {

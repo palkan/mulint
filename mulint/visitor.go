@@ -51,7 +51,8 @@ func (v *Visitor) AnalyzeAll() {
 	v.conditionals.PropagateConditionalLocks(v.funcs, v.funcFQN)
 
 	// Pass 2: Identify wrapper methods from collected scopes
-	v.wrappers.IdentifyWrappers(v.scopes, v.funcs, v.funcFQN)
+	// (conditional locks from pass 1.5 exclude guarded balanced pairs)
+	v.wrappers.IdentifyWrappers(v.scopes, v.funcs, v.funcFQN, v.conditionals)
 
 	// Pass 3: Re-analyze bodies without scopes using wrapper awareness
 	for _, fn := range v.funcs {

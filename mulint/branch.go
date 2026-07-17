@@ -29,6 +29,10 @@ type BranchTracker struct {
 	// For wrapper support
 	registry *WrapperRegistry
 	typeInfo *types.Info
+
+	// Function-local closures that release mutexes when called (read-only,
+	// shared across clones).
+	closures map[types.Object]*LocalUnlockClosure
 }
 
 func NewBranchTracker() *BranchTracker {
@@ -61,6 +65,7 @@ func (t *BranchTracker) Clone() *BranchTracker {
 		errors:   t.errors, // Share pointer to collect all errors
 		registry: t.registry,
 		typeInfo: t.typeInfo,
+		closures: t.closures,
 	}
 	for k, v := range t.ongoing {
 		clone.ongoing[k] = v
@@ -69,6 +74,12 @@ func (t *BranchTracker) Clone() *BranchTracker {
 		clone.defers[k] = v
 	}
 	return clone
+}
+
+// SetLocalClosures registers the function-local unlock closures for this
+// tracker (and all clones forked from it).
+func (t *BranchTracker) SetLocalClosures(closures map[types.Object]*LocalUnlockClosure) {
+	t.closures = closures
 }
 
 // Errors returns all collected missing unlock errors.
@@ -102,8 +113,8 @@ func (t *BranchTracker) analyzeStmt(stmt ast.Stmt) {
 	// Check for wrapper lock call
 	t.checkWrapperLockCall(stmt)
 
-	// Check for deferred unlock (direct)
-	if e := subjectForDeferUnlockCall(stmt); e != nil {
+	// Check for deferred unlocks (direct or inside a deferred closure)
+	for _, e := range subjectsForDeferUnlockCall(stmt) {
 		if IsMutexType(e, t.typeInfo) {
 			selector := StrExpr(e)
 			t.defers[selector] = true
@@ -123,6 +134,9 @@ func (t *BranchTracker) analyzeStmt(stmt ast.Stmt) {
 
 	// Check for wrapper unlock call
 	t.checkWrapperUnlockCall(stmt)
+
+	// Check for local unlock-closure calls (direct or deferred)
+	t.checkClosureUnlockCall(stmt)
 
 	// Check for return statement
 	if ret, ok := stmt.(*ast.ReturnStmt); ok {
@@ -238,6 +252,48 @@ func blockTerminates(stmts []ast.Stmt) bool {
 	}
 	_, ok := stmts[len(stmts)-1].(*ast.ReturnStmt)
 	return ok
+}
+
+// checkClosureUnlockCall applies the release effect of function-local unlock
+// closures: `cleanup()` releases its mutexes at the call site, and
+// `defer cleanup()` registers them as deferred unlocks.
+func (t *BranchTracker) checkClosureUnlockCall(stmt ast.Stmt) {
+	if t.closures == nil || t.typeInfo == nil {
+		return
+	}
+
+	if deferStmt, ok := stmt.(*ast.DeferStmt); ok {
+		if c := t.closureForCall(deferStmt.Call); c != nil {
+			for _, selector := range c.Unlocks {
+				t.defers[selector] = true
+			}
+		}
+		return
+	}
+
+	call := CallExpr(stmt)
+	if call == nil {
+		return
+	}
+	if c := t.closureForCall(call); c != nil {
+		for _, selector := range c.Unlocks {
+			delete(t.ongoing, selector)
+		}
+	}
+}
+
+// closureForCall resolves a direct call through an identifier to a registered
+// local unlock closure, if any.
+func (t *BranchTracker) closureForCall(call *ast.CallExpr) *LocalUnlockClosure {
+	ident, ok := call.Fun.(*ast.Ident)
+	if !ok {
+		return nil
+	}
+	obj := t.typeInfo.Uses[ident]
+	if obj == nil {
+		return nil
+	}
+	return t.closures[obj]
 }
 
 // checkReturnWithLocks checks if there are held locks when returning.
