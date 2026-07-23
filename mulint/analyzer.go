@@ -11,8 +11,11 @@ import (
 
 var Mulint = &analysis.Analyzer{
 	Name: "mulint",
-	Doc:  "reports reentrant mutex locks",
-	Run:  run,
+	Doc: "reports mutex misuses: reentrant locks and missing unlocks\n\n" +
+		"Detects self-deadlocks: acquiring a sync.Mutex or sync.RWMutex that is " +
+		"already held, either directly or transitively through function calls, " +
+		"and return statements that leave a mutex locked.",
+	Run: run,
 }
 
 func run(pass *analysis.Pass) (interface{}, error) {

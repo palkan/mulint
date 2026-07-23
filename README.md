@@ -31,6 +31,66 @@ go vet -vettool=$(which mulint-vet) ./...
 
 Results are the same as with the standalone binary, but `go vet` caches per-package analysis results in the Go build cache, so repeated runs are near-instant and incremental runs only re-analyze changed packages and their dependents. Prefer this mode for large projects and CI.
 
+### GitHub Action
+
+We provide a GitHub Action, so you can quickly drop the mulint check to your workflow:
+
+```yaml
+steps:
+  - uses: actions/checkout@v4
+  - uses: actions/setup-go@v6
+    with:
+      go-version-file: go.mod
+  - uses: palkan/mulint@master
+```
+
+**NOTE:** `setup-go` is required (or any other form of installing Go).
+
+Inputs (and their defaults):
+
+```yaml
+  - uses: palkan/mulint@master
+    with:
+      args: ./... # package patterns and flags
+      working-directory: . # where to run
+      annotations: 'false' # PR annotations via problem matcher
+```
+
+### golangci-lint plugin
+
+mulint can be included in a custom [golangci-lint](https://golangci-lint.run) binary as a [module plugin](https://golangci-lint.run/docs/plugins/module-plugins/).
+
+Create `.custom-gcl.yml` next to your `.golangci.yml`:
+
+```yaml
+version: v2.11.2 # golangci-lint version to build with
+plugins:
+  - module: 'github.com/palkan/mulint'
+    import: 'github.com/palkan/mulint/gclplugin'
+    version: latest
+```
+
+Build the custom binary (requires Go and git):
+
+```bash
+golangci-lint custom # produces ./custom-gcl
+```
+
+Then enable mulint in `.golangci.yml` and use `custom-gcl` instead of `golangci-lint`:
+
+```yaml
+version: "2"
+linters:
+  enable:
+    - mulint
+  settings:
+    custom:
+      mulint:
+        type: module
+        description: Detects mutex misuses (reentrant locks, missing unlocks)
+        original-url: github.com/palkan/mulint
+```
+
 ## What It Detects
 
 > [!NOTE]

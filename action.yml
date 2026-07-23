@@ -1,0 +1,50 @@
+name: 'mulint'
+description: 'Detect mutex misuses (self-deadlocks) in Go code: reentrant locks and missing unlocks'
+author: 'Vladimir Dementyev'
+branding:
+  icon: 'lock'
+  color: 'orange'
+
+inputs:
+  args:
+    description: 'Arguments passed to mulint (package patterns and flags)'
+    required: false
+    default: './...'
+  working-directory:
+    description: 'Directory to run mulint in'
+    required: false
+    default: '.'
+  annotations:
+    description: 'Annotate findings on pull requests via a problem matcher'
+    required: false
+    default: 'false'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Check Go toolchain
+      shell: bash
+      run: |
+        if ! command -v go >/dev/null 2>&1; then
+          echo "::error::mulint requires Go. Add an actions/setup-go step before this action."
+          exit 1
+        fi
+
+    - name: Build mulint
+      shell: bash
+      run: go build -C "$GITHUB_ACTION_PATH" -o "$RUNNER_TEMP/mulint" .
+
+    - name: Register problem matcher
+      if: ${{ inputs.annotations == 'true' }}
+      shell: bash
+      run: echo "::add-matcher::$GITHUB_ACTION_PATH/.github/mulint-matcher.json"
+
+    - name: Run mulint
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: '"$RUNNER_TEMP/mulint" ${{ inputs.args }}'
+
+    - name: Remove problem matcher
+      if: ${{ always() && inputs.annotations == 'true' }}
+      shell: bash
+      run: echo "::remove-matcher owner=mulint::"

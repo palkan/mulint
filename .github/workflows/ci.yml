@@ -16,6 +16,27 @@ jobs:
           version: v2.6.1
           args: --timeout 3m
 
+  action-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - name: Action passes on a clean package
+        uses: ./
+        with:
+          args: ./mulint/...
+      - name: Action fails on fixtures with violations
+        id: negative
+        uses: ./
+        continue-on-error: true
+        with:
+          args: ./tests/
+          annotations: 'false'
+      - name: Assert violations were detected
+        run: test "${{ steps.negative.outcome }}" = "failure"
+
   test:
     strategy:
       matrix:
