@@ -19,6 +19,18 @@ service.go:45: Mutex lock is acquired on this line: s.helper()
 
 The tool uses `golang.org/x/tools/go/analysis`, so standard Go package patterns work.
 
+### Running via go vet (cached, incremental)
+
+The `mulint-vet` binary is a [unitchecker](https://pkg.go.dev/golang.org/x/tools/go/analysis/unitchecker) variant meant to be driven by `go vet`:
+
+```bash
+go install github.com/palkan/mulint/cmd/mulint-vet@latest
+
+go vet -vettool=$(which mulint-vet) ./...
+```
+
+Results are the same as with the standalone binary, but `go vet` caches per-package analysis results in the Go build cache, so repeated runs are near-instant and incremental runs only re-analyze changed packages and their dependents. Prefer this mode for large projects and CI.
+
 ## What It Detects
 
 > [!NOTE]

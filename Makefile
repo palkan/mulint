@@ -1,9 +1,11 @@
 OUTPUT ?= dist/mulint
+VET_OUTPUT ?= dist/mulint-vet
 
 default: build
 
 build:
 	go build -o $(OUTPUT) .
+	go build -o $(VET_OUTPUT) ./cmd/mulint-vet
 
 install:
 	go install ./...
