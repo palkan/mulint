@@ -24,6 +24,7 @@ func Test_MixedLocks(t *testing.T) {
 		"tests/conditional_locks.go":   LoadFile("conditional_locks.go"),
 		"tests/defer_locks.go":         LoadFile("defer_locks.go"),
 		"tests/closure_locks.go":       LoadFile("closure_locks.go"),
+		"tests/ignore_locks.go":        LoadFile("ignore_locks.go"),
 	}
 	dir, cleanup, err := analysistest.WriteFiles(filemap)
 	if err != nil {

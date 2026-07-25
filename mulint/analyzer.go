@@ -32,11 +32,19 @@ func run(pass *analysis.Pass) (interface{}, error) {
 	a := NewAnalyzer(pass, v.Scopes(), v.Calls(), v.Funcs(), v.Wrappers(), v.Conditionals(), pass.TypesInfo)
 	a.Analyze()
 
+	ignores := buildIgnoreSet(pass)
+
 	for _, e := range a.Errors() {
+		if ignores.Ignored(pass.Fset, e.secondLock.Pos()) || ignores.Ignored(pass.Fset, e.origin.Pos()) {
+			continue
+		}
 		e.Report(pass)
 	}
 
 	for _, e := range a.MissingUnlockErrors() {
+		if ignores.Ignored(pass.Fset, e.returnPos.Pos()) || ignores.Ignored(pass.Fset, e.lockPos.Pos()) {
+			continue
+		}
 		e.Report(pass)
 	}
 

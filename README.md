@@ -91,6 +91,23 @@ linters:
         original-url: github.com/palkan/mulint
 ```
 
+### Suppressing violations
+
+To ignore a specific violation (e.g., a false positive), annotate the reported line
+with a `//mulint:ignore` comment, either trailing or on the line right above:
+
+```go
+mu.Lock() //mulint:ignore
+
+//mulint:ignore
+mu.Lock()
+```
+
+The directive could also be put on the line of the origin lock (the one shown in
+the report as "the same lock was acquired here" / "lock was acquired here").
+
+You can also use `//nolint` and `//nolint:mulint` (or any nolint list containing `mulint`). (Not only with golangci-lint but with any other mode.)
+
 ## What It Detects
 
 > [!NOTE]
@@ -290,6 +307,7 @@ yourself:
 - Closure cascades.
 
 Found another? Please [open an issue](https://github.com/palkan/mulint/issues)!
+In the meantime, silence it with a [`//mulint:ignore` directive](#suppressing-violations).
 
 ## Limitations
 
