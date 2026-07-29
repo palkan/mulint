@@ -113,17 +113,20 @@ func IsMutexType(expr ast.Expr, info *types.Info) bool {
 	return isMutexTypeName(t)
 }
 
-// isMutexTypeName checks if a type is sync.Mutex or sync.RWMutex.
+// isMutexTypeName checks if a type is sync.Mutex or sync.RWMutex,
+// either directly or by embedding one.
 func isMutexTypeName(t types.Type) bool {
-	// Handle pointer types
 	if ptr, ok := t.(*types.Pointer); ok {
 		t = ptr.Elem()
 	}
 
-	// Get the named type
 	named, ok := t.(*types.Named)
 	if !ok {
-		return false
+		st, ok := t.(*types.Struct)
+		if !ok {
+			return false
+		}
+		return structEmbedsMutex(st)
 	}
 
 	obj := named.Obj()
@@ -134,5 +137,38 @@ func isMutexTypeName(t types.Type) bool {
 	pkgPath := obj.Pkg().Path()
 	typeName := obj.Name()
 
-	return pkgPath == "sync" && (typeName == "Mutex" || typeName == "RWMutex")
+	if pkgPath == "sync" && (typeName == "Mutex" || typeName == "RWMutex") {
+		return true
+	}
+
+	if st, ok := named.Underlying().(*types.Struct); ok {
+		return structEmbedsMutex(st)
+	}
+
+	return false
+}
+
+func structEmbedsMutex(st *types.Struct) bool {
+	for i := 0; i < st.NumFields(); i++ {
+		f := st.Field(i)
+		if !f.Embedded() {
+			continue
+		}
+		ft := f.Type()
+		if ptr, ok := ft.(*types.Pointer); ok {
+			ft = ptr.Elem()
+		}
+		named, ok := ft.(*types.Named)
+		if !ok {
+			continue
+		}
+		obj := named.Obj()
+		if obj == nil || obj.Pkg() == nil {
+			continue
+		}
+		if obj.Pkg().Path() == "sync" && (obj.Name() == "Mutex" || obj.Name() == "RWMutex") {
+			return true
+		}
+	}
+	return false
 }

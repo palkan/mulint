@@ -137,7 +137,7 @@ type WrapperAwareTracker struct {
 
 func NewWrapperAwareTracker(registry *WrapperRegistry, typeInfo *types.Info) *WrapperAwareTracker {
 	return &WrapperAwareTracker{
-		LockTracker: NewLockTracker(),
+		LockTracker: NewLockTrackerWithInfo(typeInfo),
 		registry:    registry,
 		typeInfo:    typeInfo,
 	}
