@@ -41,7 +41,7 @@ steps:
   - uses: actions/setup-go@v6
     with:
       go-version-file: go.mod
-  - uses: palkan/mulint@v1.0.0
+  - uses: palkan/mulint@v1.1.0
 ```
 
 **NOTE:** `setup-go` is required (or any other form of installing Go).
@@ -49,7 +49,7 @@ steps:
 Inputs (and their defaults):
 
 ```yaml
-  - uses: palkan/mulint@v1.0.0
+  - uses: palkan/mulint@v1.1.0
     with:
       args: ./... # package patterns and flags
       working-directory: . # where to run
