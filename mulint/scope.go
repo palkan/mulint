@@ -106,7 +106,12 @@ func (s *MutexScope) Wrapper() *WrapperInfo {
 // LockTracker tracks mutex lock/unlock operations within a function body.
 // It maintains state about ongoing locks, deferred unlocks, and completed scopes.
 type LockTracker struct {
-	onGoing  map[string]*MutexScope
+	onGoing map[string]*MutexScope
+	// extras holds additional ongoing scopes for a selector the primary
+	// onGoing entry already occupies: scopes adopted from mutually exclusive
+	// branches that all held the same mutex at their merge point. An unlock
+	// of the selector releases the primary scope and every extra.
+	extras   map[string][]*MutexScope
 	defers   map[string]bool
 	finished []*MutexScope
 	info     *types.Info // Optional type info for filtering non-mutex Lock calls
@@ -116,17 +121,13 @@ type LockTracker struct {
 }
 
 func NewLockTracker() *LockTracker {
-	return &LockTracker{
-		onGoing:  make(map[string]*MutexScope),
-		defers:   make(map[string]bool),
-		finished: make([]*MutexScope, 0),
-		info:     nil,
-	}
+	return NewLockTrackerWithInfo(nil)
 }
 
 func NewLockTrackerWithInfo(info *types.Info) *LockTracker {
 	return &LockTracker{
 		onGoing:  make(map[string]*MutexScope),
+		extras:   make(map[string][]*MutexScope),
 		defers:   make(map[string]bool),
 		finished: make([]*MutexScope, 0),
 		info:     info,
@@ -137,12 +138,16 @@ func NewLockTrackerWithInfo(info *types.Info) *LockTracker {
 func (t *LockTracker) Clone() *LockTracker {
 	clone := &LockTracker{
 		onGoing:  make(map[string]*MutexScope, len(t.onGoing)),
+		extras:   make(map[string][]*MutexScope, len(t.extras)),
 		defers:   make(map[string]bool, len(t.defers)),
 		finished: make([]*MutexScope, 0),
 		info:     t.info,
 	}
 	for k, v := range t.onGoing {
 		clone.onGoing[k] = v
+	}
+	for k, v := range t.extras {
+		clone.extras[k] = append([]*MutexScope(nil), v...)
 	}
 	for k, v := range t.defers {
 		clone.defers[k] = v
@@ -187,6 +192,7 @@ func (t *LockTracker) Track(stmt ast.Stmt, addToOngoing bool) {
 				t.finished = append(t.finished, scope)
 				delete(t.onGoing, selector)
 			}
+			t.closeExtras(selector, false)
 			// Future: else track as unmatched unlock
 		}
 	}
@@ -255,28 +261,32 @@ func (t *LockTracker) addExprToOngoing(expr ast.Expr) {
 func (t *LockTracker) trackNestedStatements(stmt ast.Stmt, addToOngoing bool) {
 	switch s := stmt.(type) {
 	case *ast.IfStmt:
-		// Track each branch independently to avoid cross-branch contamination
+		// Track each branch independently to avoid cross-branch contamination.
+		// Both clones fork from the pre-branch state; adoption of scopes that
+		// survive a fall-through branch happens only after both are tracked.
+		var branches []*branchOutcome
 		if s.Body != nil {
 			ifTracker := t.Clone()
 			for _, inner := range s.Body.List {
 				ifTracker.Track(inner, addToOngoing)
 			}
-			ifTracker.EndBlock()
-			t.finished = append(t.finished, ifTracker.finished...)
+			branches = append(branches, &branchOutcome{ifTracker, !blockTerminates(s.Body.List)})
 		}
 		if s.Else != nil {
 			elseTracker := t.Clone()
+			falls := true
 			switch e := s.Else.(type) {
 			case *ast.BlockStmt:
 				for _, inner := range e.List {
 					elseTracker.Track(inner, addToOngoing)
 				}
+				falls = !blockTerminates(e.List)
 			case *ast.IfStmt:
 				elseTracker.Track(e, addToOngoing)
 			}
-			elseTracker.EndBlock()
-			t.finished = append(t.finished, elseTracker.finished...)
+			branches = append(branches, &branchOutcome{elseTracker, falls})
 		}
+		t.mergeBranches(branches)
 	case *ast.ForStmt:
 		if s.Body != nil {
 			for _, inner := range s.Body.List {
@@ -290,51 +300,101 @@ func (t *LockTracker) trackNestedStatements(stmt ast.Stmt, addToOngoing bool) {
 			}
 		}
 	case *ast.SwitchStmt:
-		if s.Body != nil {
-			for _, clause := range s.Body.List {
-				if cc, ok := clause.(*ast.CaseClause); ok {
-					// Track each case with a clone to avoid cross-case contamination
-					caseTracker := t.Clone()
-					for _, inner := range cc.Body {
-						caseTracker.Track(inner, addToOngoing)
-					}
-					// Finalize and merge scopes back
-					caseTracker.EndBlock()
-					t.finished = append(t.finished, caseTracker.finished...)
-				}
-			}
-		}
+		t.trackExclusiveClauses(s.Body, addToOngoing)
 	case *ast.TypeSwitchStmt:
-		if s.Body != nil {
-			for _, clause := range s.Body.List {
-				if cc, ok := clause.(*ast.CaseClause); ok {
-					caseTracker := t.Clone()
-					for _, inner := range cc.Body {
-						caseTracker.Track(inner, addToOngoing)
-					}
-					caseTracker.EndBlock()
-					t.finished = append(t.finished, caseTracker.finished...)
-				}
-			}
-		}
+		t.trackExclusiveClauses(s.Body, addToOngoing)
 	case *ast.SelectStmt:
-		if s.Body != nil {
-			for _, clause := range s.Body.List {
-				if cc, ok := clause.(*ast.CommClause); ok {
-					caseTracker := t.Clone()
-					for _, inner := range cc.Body {
-						caseTracker.Track(inner, addToOngoing)
-					}
-					caseTracker.EndBlock()
-					t.finished = append(t.finished, caseTracker.finished...)
-				}
-			}
-		}
+		t.trackExclusiveClauses(s.Body, addToOngoing)
 	case *ast.BlockStmt:
 		for _, inner := range s.List {
 			t.Track(inner, addToOngoing)
 		}
 	}
+}
+
+// branchOutcome is the tracker state at the end of one mutually exclusive
+// branch, plus whether that branch can fall through to the code after it.
+type branchOutcome struct {
+	tracker *LockTracker
+	falls   bool
+}
+
+// trackExclusiveClauses tracks switch/type-switch/select clauses, each with a
+// clone of the pre-statement state, then merges the outcomes back.
+func (t *LockTracker) trackExclusiveClauses(body *ast.BlockStmt, addToOngoing bool) {
+	if body == nil {
+		return
+	}
+	var branches []*branchOutcome
+	for _, clause := range body.List {
+		var stmts []ast.Stmt
+		switch cc := clause.(type) {
+		case *ast.CaseClause:
+			stmts = cc.Body
+		case *ast.CommClause:
+			stmts = cc.Body
+		default:
+			continue
+		}
+		caseTracker := t.Clone()
+		for _, inner := range stmts {
+			caseTracker.Track(inner, addToOngoing)
+		}
+		branches = append(branches, &branchOutcome{caseTracker, !blockTerminates(stmts)})
+	}
+	t.mergeBranches(branches)
+}
+
+// mergeBranches folds branch outcomes back into the outer tracker: scopes
+// still held at the end of a fall-through branch are adopted (execution
+// continues after the branch, so an unlock in the outer block is what
+// releases them), then each branch is finalized and its scopes collected.
+func (t *LockTracker) mergeBranches(branches []*branchOutcome) {
+	for _, b := range branches {
+		t.adoptOngoing(b.tracker, b.falls)
+		b.tracker.EndBlock()
+		t.finished = append(t.finished, b.tracker.finished...)
+	}
+}
+
+// adoptOngoing hands re-lock scopes still held at the end of a fall-through
+// branch back to the outer tracker. It only applies to the
+// unlock-wait-relock shape: the outer tracker holds the selector on entry
+// and the branch released and re-acquired it, so both paths reach the merge
+// point with the mutex held and the unlock in the outer block releases
+// either scope. Scopes covered by a deferred unlock registered in the
+// branch stay with it (EndBlock will close them). Locks first acquired
+// inside a branch are NOT adopted — a conditionally guarded acquisition
+// (`if cond { Lock }`) is the ConditionalLockRegistry's domain, and treating
+// it as held would poison the fall-through state.
+func (t *LockTracker) adoptOngoing(branch *LockTracker, falls bool) {
+	if !falls {
+		return
+	}
+	for selector, scope := range branch.onGoing {
+		if branch.defers[selector] {
+			continue
+		}
+		outer, ok := t.onGoing[selector]
+		if !ok || outer == scope {
+			continue
+		}
+		t.extras[selector] = append(t.extras[selector], scope)
+		delete(branch.onGoing, selector)
+	}
+}
+
+// closeExtras releases every extra scope tracked for the selector.
+func (t *LockTracker) closeExtras(selector string, deferred bool) {
+	for _, scope := range t.extras[selector] {
+		if deferred {
+			scope.markUnlockedDeferred()
+		} else {
+			scope.markUnlockedDirect()
+		}
+		t.finished = append(t.finished, scope)
+	}
+	delete(t.extras, selector)
 }
 
 // isCompoundStatement returns true if the statement contains nested blocks.
@@ -376,6 +436,7 @@ func (t *LockTracker) EndLock(selector string) {
 		t.finished = append(t.finished, scope)
 		delete(t.onGoing, selector)
 	}
+	t.closeExtras(selector, false)
 }
 
 // AddDeferredUnlock marks a selector as having a deferred unlock.
@@ -393,6 +454,7 @@ func (t *LockTracker) EndBlock() {
 			t.finished = append(t.finished, scope)
 			delete(t.onGoing, selector)
 		}
+		t.closeExtras(selector, true)
 	}
 
 	// Locks without unlocks still represent lock acquisition
@@ -401,10 +463,14 @@ func (t *LockTracker) EndBlock() {
 	for _, scope := range t.onGoing {
 		t.finished = append(t.finished, scope)
 	}
+	for _, scopes := range t.extras {
+		t.finished = append(t.finished, scopes...)
+	}
 
 	// Future: remaining onGoing without defers could be "missing unlock" warnings
 
 	t.onGoing = make(map[string]*MutexScope)
+	t.extras = make(map[string][]*MutexScope)
 	t.defers = make(map[string]bool)
 }
 

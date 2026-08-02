@@ -2,6 +2,8 @@
 
 ## master
 
+- Recognize the unlock-wait-relock shape inside conditions.
+
 ## 1.1.0
 
 - Recognize non-mutex wrappers with mutex-like interface.

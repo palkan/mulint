@@ -336,19 +336,35 @@ func (t *WrapperAwareTracker) analyzeMutuallyExclusiveCommCases(body *ast.BlockS
 	t.restoreOngoing(savedOngoing)
 }
 
+// ongoingSnapshot captures the held-locks state (primary and extra scopes).
+type ongoingSnapshot struct {
+	onGoing map[string]*MutexScope
+	extras  map[string][]*MutexScope
+}
+
 // snapshotOngoing creates a copy of the current ongoing locks state.
-func (t *WrapperAwareTracker) snapshotOngoing() map[string]*MutexScope {
-	snapshot := make(map[string]*MutexScope, len(t.LockTracker.onGoing))
+func (t *WrapperAwareTracker) snapshotOngoing() ongoingSnapshot {
+	snapshot := ongoingSnapshot{
+		onGoing: make(map[string]*MutexScope, len(t.LockTracker.onGoing)),
+		extras:  make(map[string][]*MutexScope, len(t.LockTracker.extras)),
+	}
 	for k, v := range t.LockTracker.onGoing {
-		snapshot[k] = v
+		snapshot.onGoing[k] = v
+	}
+	for k, v := range t.LockTracker.extras {
+		snapshot.extras[k] = append([]*MutexScope(nil), v...)
 	}
 	return snapshot
 }
 
 // restoreOngoing restores the ongoing locks state from a snapshot.
-func (t *WrapperAwareTracker) restoreOngoing(snapshot map[string]*MutexScope) {
-	t.LockTracker.onGoing = make(map[string]*MutexScope, len(snapshot))
-	for k, v := range snapshot {
+func (t *WrapperAwareTracker) restoreOngoing(snapshot ongoingSnapshot) {
+	t.LockTracker.onGoing = make(map[string]*MutexScope, len(snapshot.onGoing))
+	for k, v := range snapshot.onGoing {
 		t.LockTracker.onGoing[k] = v
+	}
+	t.LockTracker.extras = make(map[string][]*MutexScope, len(snapshot.extras))
+	for k, v := range snapshot.extras {
+		t.LockTracker.extras[k] = append([]*MutexScope(nil), v...)
 	}
 }
