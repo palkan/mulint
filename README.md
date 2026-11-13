@@ -313,6 +313,7 @@ In the meantime, silence it with a [`//mulint:ignore` directive](#suppressing-vi
 
 - Analysis is performed per package; cross-package recursive locks are not detected
 - Mutexes passed as function arguments are not tracked
+- Only locks on the method receiver are tracked across calls. A lock on another struct's mutex (for example, a `*Session` parameter of a `Node` method) is not followed into callees. This also applies to deferred calls in callees. Locking a mutex that belongs to another struct is a design smell: keep the lock and the code that needs it on the same type.
 - Dynamic dispatch (interface method calls) is not analyzed
 
 ## License

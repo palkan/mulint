@@ -2,6 +2,8 @@
 
 ## master
 
+## 1.1.1
+
 - Recognize the unlock-wait-relock shape inside conditions.
 
 ## 1.1.0
